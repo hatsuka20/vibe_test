@@ -1,11 +1,10 @@
 import hashlib
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Sequence
 
 from environment import Environment, LocalEnvironment
 
@@ -37,19 +36,13 @@ def stable_json_dumps(obj: Any) -> bytes:
 @dataclass(frozen=True)
 class Artifact:
     key: str
-    path: str
+    path: Path
     format: str
     schema: str
     producer: str
     cache_key: str
     sha256: str
     meta: dict[str, Any] = field(default_factory=dict)
-
-    def path_obj(self) -> Path:
-        return Path(self.path)
-
-    def exists(self) -> bool:
-        return self.path_obj().exists()
 
 
 @dataclass(frozen=True)
@@ -82,9 +75,14 @@ class RunContext:
         self.save_manifest()
 
     def save_manifest(self) -> None:
+        def _serialize(v: Artifact) -> dict[str, Any]:
+            d = asdict(v)
+            d["path"] = str(d["path"])
+            return d
+
         obj = {
             "run_dir": str(self.run_dir),
-            "artifacts": {k: asdict(v) for k, v in self.artifacts.items()},
+            "artifacts": {k: _serialize(v) for k, v in self.artifacts.items()},
         }
         json_dump(self.manifest_path, obj)
 
@@ -96,6 +94,7 @@ class RunContext:
             obj = json_load(mp)
             arts = {}
             for k, v in obj.get("artifacts", {}).items():
+                v["path"] = Path(v["path"])
                 arts[k] = Artifact(**v)
             ctx.artifacts = arts
         return ctx
@@ -116,18 +115,6 @@ class ProducedArtifact:
     schema: str
 
 
-class Process(Protocol):
-    name: str
-    requires: Sequence[str]
-    optional: Sequence[OptionalInput]
-    produces: Sequence[str]
-    version: str
-
-    def params(self) -> dict[str, Any]: ...
-
-    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]: ...
-
-
 @dataclass
 class ProcessBase(ABC):
     """Process の基底クラス. 共通フィールドのデフォルトを提供する."""
@@ -145,7 +132,7 @@ class ProcessBase(ABC):
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]: ...
 
 
-def compute_cache_key(process: Process, ctx: RunContext) -> str:
+def compute_cache_key(process: ProcessBase, ctx: RunContext) -> str:
     required = []
     for k in process.requires:
         a = ctx.get(k)
@@ -174,8 +161,15 @@ def compute_cache_key(process: Process, ctx: RunContext) -> str:
 
 
 class Pipeline:
-    def __init__(self, processes: Sequence[Process]) -> None:
+    def __init__(self, processes: Sequence[ProcessBase]) -> None:
         self.processes = list(processes)
+        names = [p.name for p in self.processes]
+        empty = [i for i, n in enumerate(names) if not n]
+        if empty:
+            raise ValueError(f"Process at index {empty} has empty name")
+        if len(names) != len(set(names)):
+            dupes = {n for n in names if names.count(n) > 1}
+            raise ValueError(f"Duplicate process names: {dupes}")
 
     def run(
         self,
@@ -186,6 +180,11 @@ class Pipeline:
         force_processes: Sequence[str] | None = None,
     ) -> RunContext:
         force = set(force_processes or [])
+        all_names = {p.name for p in self.processes}
+        unknown = force - all_names
+        if unknown:
+            raise ValueError(f"Unknown force_processes: {unknown}")
+
         start_idx = 0
         if from_process is not None:
             names = [p.name for p in self.processes]
@@ -205,7 +204,7 @@ class Pipeline:
             cache_hit = True
             for pk in proc.produces:
                 art = ctx.artifacts.get(pk)
-                if not art or art.cache_key != ck or not Path(art.path).exists():
+                if not art or art.cache_key != ck or not art.path.exists() or sha256_file(art.path) != art.sha256:
                     cache_hit = False
                     break
 
@@ -214,20 +213,30 @@ class Pipeline:
 
             produced = proc.run(ctx, exec_ctx)
 
+            produced_keys = set(produced.keys())
+            expected_keys = set(proc.produces)
+            if produced_keys != expected_keys:
+                missing = expected_keys - produced_keys
+                extra = produced_keys - expected_keys
+                parts = [f"Process '{proc.name}' produces mismatch:"]
+                if missing:
+                    parts.append(f"missing={missing}")
+                if extra:
+                    parts.append(f"unexpected={extra}")
+                raise RuntimeError(" ".join(parts))
+
             for key, part in produced.items():
                 sha = sha256_file(part.path)
                 ctx.put(
                     Artifact(
                         key=key,
-                        path=str(part.path),
+                        path=part.path,
                         format=part.format,
                         schema=part.schema,
                         producer=proc.name,
                         cache_key=ck,
                         sha256=sha,
-                        meta={"ts": time.time()},
                     )
                 )
 
         return ctx
-

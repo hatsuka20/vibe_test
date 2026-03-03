@@ -9,7 +9,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -39,9 +39,12 @@ class Environment(ABC):
 
 
 class LocalEnvironment(Environment):
+    def __init__(self, timeout: float = 1000) -> None:
+        self.timeout = timeout
+
     def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
         argv = command.build()
-        result = subprocess.run(argv, cwd=cwd, capture_output=True)
+        result = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=self.timeout)
         return CommandResult(
             command=argv,
             returncode=result.returncode,
@@ -51,9 +54,10 @@ class LocalEnvironment(Environment):
 
 
 class RemoteEnvironment(Environment):
-    def __init__(self, host: str, user: str | None = None) -> None:
+    def __init__(self, host: str, user: str | None = None, timeout: float = 1000) -> None:
         self.host = host
         self.user = user
+        self.timeout = timeout
 
     @property
     def _target(self) -> str:
@@ -65,7 +69,7 @@ class RemoteEnvironment(Environment):
         if cwd:
             remote_cmd = f"cd {shlex.quote(str(cwd))} && {remote_cmd}"
         ssh_command = ["ssh", self._target, remote_cmd]
-        result = subprocess.run(ssh_command, capture_output=True)
+        result = subprocess.run(ssh_command, capture_output=True, timeout=self.timeout)
         return CommandResult(
             command=argv,
             returncode=result.returncode,

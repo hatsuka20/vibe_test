@@ -60,7 +60,7 @@ def put_artifact(
         path.write_bytes(content)
         run_ctx.artifacts[key] = Artifact(
             key=key,
-            path=str(path),
+            path=path,
             format=fmt,
             schema=schema,
             producer="test",
@@ -140,7 +140,7 @@ class TestDownloadModel:
         proc = DownloadModel(url="https://example.com/custom.onnx")
         assert proc.params() == {"url": "https://example.com/custom.onnx"}
 
-    def test_protocol_fields(self) -> None:
+    def test_process_fields(self) -> None:
         proc = DownloadModel()
         assert proc.name == "download_model"
         assert proc.requires == []

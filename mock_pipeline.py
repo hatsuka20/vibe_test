@@ -1,15 +1,12 @@
 """仮想的な4段パイプラインのモック実装."""
 
-import argparse
 import json
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from environment import CommandBuilder, DryRunEnvironment
+from environment import CommandBuilder
 from pipeline import (
     ExecContext,
-    Pipeline,
     ProcessBase,
     ProducedArtifact,
     RunContext,
@@ -77,7 +74,7 @@ class DownloadModel(ProcessBase):
 
         cmd = CurlDownload(url=self.url, output=model_path)
         exec_ctx.logger.info("[A] モデルをダウンロード中: %s", self.url)
-        exec_ctx.env.run(cmd)
+        _result = exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         model_path.write_bytes(b"\x00MOCK_ONNX_MODEL_WEIGHTS" * 64)
@@ -106,12 +103,12 @@ class CompileModel(ProcessBase):
         cpp_path = exec_ctx.out_dir / "model_compiled.cpp"
 
         cmd = ModelCompile(
-            model_path=Path(model_art.path),
+            model_path=model_art.path,
             output=cpp_path,
             optimization_level=self.optimization_level,
         )
         exec_ctx.logger.info("[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level)
-        exec_ctx.env.run(cmd)
+        _result = exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         cpp_content = f"""\
@@ -155,16 +152,16 @@ class RunModel(ProcessBase):
         profile_path = exec_ctx.out_dir / "profile.json"
 
         cmd = RuntimeExec(
-            compiled_path=Path(compiled_art.path),
+            compiled_path=compiled_art.path,
             profile_output=profile_path,
             num_iterations=self.num_iterations,
         )
         exec_ctx.logger.info("[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations)
-        exec_ctx.env.run(cmd)
+        _result = exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         profile_data = {
-            "source": compiled_art.path,
+            "source": str(compiled_art.path),
             "iterations": self.num_iterations,
             "latency_ms": {"min": 1.2, "max": 5.8, "mean": 2.4, "p99": 4.9},
             "throughput_items_per_sec": 416.7,
@@ -197,7 +194,7 @@ class FormatProfile(ProcessBase):
         profile_art = ctx.get("profile")
         exec_ctx.logger.info("[D] プロファイルを整形中: %s", profile_art.path)
 
-        profile = json.loads(Path(profile_art.path).read_text(encoding="utf-8"))
+        profile = json.loads(profile_art.path.read_text(encoding="utf-8"))
         lat = profile["latency_ms"]
 
         lines = [
@@ -231,46 +228,3 @@ class FormatProfile(ProcessBase):
 
         exec_ctx.logger.info("[D] レポート生成完了 -> %s", report_path)
         return {"report": ProducedArtifact(report_path, "txt", "report.human.v1")}
-
-
-# ---------------------------------------------------------------------------
-# エントリポイント
-# ---------------------------------------------------------------------------
-def main() -> None:
-    class Args(argparse.Namespace):
-        experiment_name: str
-
-    parser = argparse.ArgumentParser(description="モックパイプラインの実行")
-    parser.add_argument("experiment_name", help="実験名 (experiments/<name> に出力)")
-    args = parser.parse_args(namespace=Args())
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logger = logging.getLogger("mock_pipeline")
-
-    base_dir = Path("experiments") / args.experiment_name
-    run_dir = base_dir / "run"
-    out_dir = base_dir / "out"
-    temp_dir = base_dir / "tmp"
-    for d in (out_dir, temp_dir):
-        d.mkdir(parents=True, exist_ok=True)
-
-    env = DryRunEnvironment()
-    ctx = RunContext.load(run_dir=run_dir)
-    exec_ctx = ExecContext(out_dir=out_dir, temp_dir=temp_dir, logger=logger, env=env)
-
-    pipeline = Pipeline([
-        DownloadModel(),
-        CompileModel(),
-        RunModel(),
-        FormatProfile(),
-    ])
-
-    ctx = pipeline.run(ctx, exec_ctx)
-
-    logger.info("Manifest: %s", ctx.manifest_path)
-    for cmd in env.history:
-        logger.info("Command: %s", " ".join(cmd.build()))
-
-
-if __name__ == "__main__":
-    main()
