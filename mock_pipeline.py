@@ -6,12 +6,55 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from environment import CommandBuilder, DryRunEnvironment
 from main import (
     ExecContext,
     OptionalInput,
     Pipeline,
     RunContext,
 )
+
+
+# ---------------------------------------------------------------------------
+# CommandBuilder 群
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CurlDownload(CommandBuilder):
+    url: str
+    output: Path
+
+    def build(self) -> list[str]:
+        return ["curl", "-sSL", "-o", str(self.output), self.url]
+
+
+@dataclass(frozen=True)
+class ModelCompile(CommandBuilder):
+    model_path: Path
+    output: Path
+    optimization_level: int
+
+    def build(self) -> list[str]:
+        return [
+            "model-compiler",
+            f"-O{self.optimization_level}",
+            "-o", str(self.output),
+            str(self.model_path),
+        ]
+
+
+@dataclass(frozen=True)
+class RuntimeExec(CommandBuilder):
+    compiled_path: Path
+    profile_output: Path
+    num_iterations: int
+
+    def build(self) -> list[str]:
+        return [
+            "model-runtime",
+            "--profile", str(self.profile_output),
+            "--iterations", str(self.num_iterations),
+            str(self.compiled_path),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -31,9 +74,13 @@ class DownloadModel:
         return {"url": self.url}
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]:
-        exec_ctx.logger.info("[A] モデルをダウンロード中: %s", self.url)
-
         model_path = exec_ctx.out_dir / "resnet50.onnx"
+
+        cmd = CurlDownload(url=self.url, output=model_path)
+        exec_ctx.logger.info("[A] モデルをダウンロード中: %s", self.url)
+        exec_ctx.env.run(cmd.build())
+
+        # mock: 実コマンドの代わりにダミーファイルを生成
         model_path.write_bytes(b"\x00MOCK_ONNX_MODEL_WEIGHTS" * 64)
 
         exec_ctx.logger.info("[A] ダウンロード完了 -> %s", model_path)
@@ -58,9 +105,17 @@ class CompileModel:
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]:
         model_art = ctx.get("model")
-        exec_ctx.logger.info("[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level)
-
         cpp_path = exec_ctx.out_dir / "model_compiled.cpp"
+
+        cmd = ModelCompile(
+            model_path=Path(model_art.path),
+            output=cpp_path,
+            optimization_level=self.optimization_level,
+        )
+        exec_ctx.logger.info("[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level)
+        exec_ctx.env.run(cmd.build())
+
+        # mock: 実コマンドの代わりにダミーファイルを生成
         cpp_content = f"""\
 // Auto-generated from {model_art.path}
 // optimization_level = {self.optimization_level}
@@ -100,8 +155,17 @@ class RunModel:
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]:
         compiled_art = ctx.get("compiled_model")
-        exec_ctx.logger.info("[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations)
+        profile_path = exec_ctx.out_dir / "profile.json"
 
+        cmd = RuntimeExec(
+            compiled_path=Path(compiled_art.path),
+            profile_output=profile_path,
+            num_iterations=self.num_iterations,
+        )
+        exec_ctx.logger.info("[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations)
+        exec_ctx.env.run(cmd.build())
+
+        # mock: 実コマンドの代わりにダミーファイルを生成
         profile_data = {
             "source": compiled_art.path,
             "iterations": self.num_iterations,
@@ -115,8 +179,6 @@ class RunModel:
                 {"name": "fc_1", "time_ms": 0.5, "memory_mb": 16.0},
             ],
         }
-
-        profile_path = exec_ctx.out_dir / "profile.json"
         profile_path.write_text(json.dumps(profile_data, indent=2), encoding="utf-8")
 
         exec_ctx.logger.info("[C] 実行完了 -> %s", profile_path)
@@ -125,6 +187,7 @@ class RunModel:
 
 # ---------------------------------------------------------------------------
 # Process D: プロファイルを人間が読みやすいレポートに整形する (mock)
+#   subprocess 不要のため CommandBuilder / Environment は使用しない
 # ---------------------------------------------------------------------------
 @dataclass
 class FormatProfile:
@@ -181,9 +244,12 @@ class FormatProfile:
 # エントリポイント
 # ---------------------------------------------------------------------------
 def main() -> None:
+    class Args(argparse.Namespace):
+        experiment_name: str
+
     parser = argparse.ArgumentParser(description="モックパイプラインの実行")
     parser.add_argument("experiment_name", help="実験名 (experiments/<name> に出力)")
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=Args())
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logger = logging.getLogger("mock_pipeline")
@@ -195,8 +261,9 @@ def main() -> None:
     for d in (out_dir, temp_dir):
         d.mkdir(parents=True, exist_ok=True)
 
+    env = DryRunEnvironment()
     ctx = RunContext(run_dir=run_dir)
-    exec_ctx = ExecContext(out_dir=out_dir, temp_dir=temp_dir, logger=logger)
+    exec_ctx = ExecContext(out_dir=out_dir, temp_dir=temp_dir, logger=logger, env=env)
 
     pipeline = Pipeline([
         DownloadModel(),
@@ -207,8 +274,9 @@ def main() -> None:
 
     ctx = pipeline.run(ctx, exec_ctx)
 
-    # manifest の内容を表示
     logger.info("Manifest: %s", ctx.manifest_path)
+    for cmd in env.history:
+        logger.info("Command: %s", " ".join(cmd))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+from environment import Environment, LocalEnvironment
+
 
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
@@ -103,6 +105,7 @@ class ExecContext:
     out_dir: Path
     temp_dir: Path
     logger: logging.Logger
+    env: Environment = field(default_factory=LocalEnvironment)
 
 
 class Process(Protocol):
