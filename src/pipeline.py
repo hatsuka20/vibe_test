@@ -117,7 +117,17 @@ class ProducedArtifact:
 
 @dataclass
 class ProcessBase(ABC):
-    """Process の基底クラス. 共通フィールドのデフォルトを提供する."""
+    """Process の基底クラス. 共通フィールドのデフォルトを提供する.
+
+    Versioning rules:
+        version — Process 実装のバージョン (semver).
+            同じ入力に対して出力の「値」が変わりうる変更で bump する.
+            キャッシュ無効化のトリガーとして使用される.
+        ProducedArtifact.schema — 出力の構造的契約.
+            下流 Process が期待するフォーマット仕様を表す.
+            出力構造の破壊的変更でのみ更新する.
+    両者は独立した軸であり、version の bump が schema の変更を
+    必ずしも伴わない (例: バグ修正)."""
 
     name: str = ""
     version: str = "0.0.0"
