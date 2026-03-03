@@ -140,11 +140,10 @@ def compute_cache_key(process: ProcessBase, ctx: RunContext) -> str:
 
     optional = []
     for opt in process.optional:
-        a = ctx.get_optional(opt.key)
-
         if not opt.affects_cache:
             continue
 
+        a = ctx.get_optional(opt.key)
         if a:
             optional.append((opt.key, True, a.sha256, a.schema))
         else:

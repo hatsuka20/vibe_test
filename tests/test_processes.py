@@ -1,4 +1,4 @@
-"""mock_pipeline の各 Process に対する単体テスト."""
+"""processes の各 Process / CommandBuilder に対する単体テスト."""
 
 import json
 import logging

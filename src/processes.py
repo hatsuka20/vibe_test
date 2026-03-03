@@ -1,4 +1,4 @@
-"""仮想的な4段パイプラインのモック実装."""
+"""パイプラインを構成する Process / CommandBuilder の定義."""
 
 import json
 from dataclasses import dataclass, field
