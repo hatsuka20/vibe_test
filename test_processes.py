@@ -9,7 +9,7 @@ import pytest
 
 from environment import DryRunEnvironment
 from pipeline import Artifact, ExecContext, RunContext
-from mock_pipeline import (
+from processes import (
     CompileModel,
     CurlDownload,
     DownloadModel,

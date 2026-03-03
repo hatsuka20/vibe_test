@@ -6,7 +6,7 @@ from pathlib import Path
 
 from environment import DryRunEnvironment
 from pipeline import ExecContext, Pipeline, RunContext
-from mock_pipeline import CompileModel, DownloadModel, FormatProfile, RunModel
+from processes import CompileModel, DownloadModel, FormatProfile, RunModel
 
 class Args(argparse.Namespace):
     experiment_name: str
