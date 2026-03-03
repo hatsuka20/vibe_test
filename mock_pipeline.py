@@ -9,8 +9,9 @@ from pathlib import Path
 from environment import CommandBuilder, DryRunEnvironment
 from main import (
     ExecContext,
-    OptionalInput,
     Pipeline,
+    ProcessBase,
+    ProducedArtifact,
     RunContext,
 )
 
@@ -61,10 +62,8 @@ class RuntimeExec(CommandBuilder):
 # Process A: リモートサーバからモデルをダウンロードする (mock)
 # ---------------------------------------------------------------------------
 @dataclass
-class DownloadModel:
+class DownloadModel(ProcessBase):
     name: str = "download_model"
-    requires: list[str] = field(default_factory=list)
-    optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=lambda: ["model"])
     version: str = "1.0.0"
 
@@ -73,7 +72,7 @@ class DownloadModel:
     def params(self) -> dict:
         return {"url": self.url}
 
-    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]:
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         model_path = exec_ctx.out_dir / "resnet50.onnx"
 
         cmd = CurlDownload(url=self.url, output=model_path)
@@ -84,17 +83,16 @@ class DownloadModel:
         model_path.write_bytes(b"\x00MOCK_ONNX_MODEL_WEIGHTS" * 64)
 
         exec_ctx.logger.info("[A] ダウンロード完了 -> %s", model_path)
-        return {"model": (model_path, "onnx", "model.onnx.v1")}
+        return {"model": ProducedArtifact(model_path, "onnx", "model.onnx.v1")}
 
 
 # ---------------------------------------------------------------------------
 # Process B: モデルを中間形式 (cpp) にコンパイルする (mock)
 # ---------------------------------------------------------------------------
 @dataclass
-class CompileModel:
+class CompileModel(ProcessBase):
     name: str = "compile_model"
     requires: list[str] = field(default_factory=lambda: ["model"])
-    optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=lambda: ["compiled_model"])
     version: str = "1.0.0"
 
@@ -103,7 +101,7 @@ class CompileModel:
     def params(self) -> dict:
         return {"optimization_level": self.optimization_level}
 
-    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]:
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         model_art = ctx.get("model")
         cpp_path = exec_ctx.out_dir / "model_compiled.cpp"
 
@@ -134,17 +132,16 @@ namespace model {{
         cpp_path.write_text(cpp_content, encoding="utf-8")
 
         exec_ctx.logger.info("[B] コンパイル完了 -> %s", cpp_path)
-        return {"compiled_model": (cpp_path, "cpp", "compiled.cpp.v1")}
+        return {"compiled_model": ProducedArtifact(cpp_path, "cpp", "compiled.cpp.v1")}
 
 
 # ---------------------------------------------------------------------------
 # Process C: Runtime で中間形式を実行し、プロファイルを取得する (mock)
 # ---------------------------------------------------------------------------
 @dataclass
-class RunModel:
+class RunModel(ProcessBase):
     name: str = "run_model"
     requires: list[str] = field(default_factory=lambda: ["compiled_model"])
-    optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=lambda: ["profile"])
     version: str = "1.0.0"
 
@@ -153,7 +150,7 @@ class RunModel:
     def params(self) -> dict:
         return {"num_iterations": self.num_iterations}
 
-    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]:
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         compiled_art = ctx.get("compiled_model")
         profile_path = exec_ctx.out_dir / "profile.json"
 
@@ -182,7 +179,7 @@ class RunModel:
         profile_path.write_text(json.dumps(profile_data, indent=2), encoding="utf-8")
 
         exec_ctx.logger.info("[C] 実行完了 -> %s", profile_path)
-        return {"profile": (profile_path, "json", "profile.runtime.v1")}
+        return {"profile": ProducedArtifact(profile_path, "json", "profile.runtime.v1")}
 
 
 # ---------------------------------------------------------------------------
@@ -190,17 +187,13 @@ class RunModel:
 #   subprocess 不要のため CommandBuilder / Environment は使用しない
 # ---------------------------------------------------------------------------
 @dataclass
-class FormatProfile:
+class FormatProfile(ProcessBase):
     name: str = "format_profile"
     requires: list[str] = field(default_factory=lambda: ["profile"])
-    optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=lambda: ["report"])
     version: str = "1.0.0"
 
-    def params(self) -> dict:
-        return {}
-
-    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]:
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         profile_art = ctx.get("profile")
         exec_ctx.logger.info("[D] プロファイルを整形中: %s", profile_art.path)
 
@@ -237,7 +230,7 @@ class FormatProfile:
         report_path.write_text("\n".join(lines), encoding="utf-8")
 
         exec_ctx.logger.info("[D] レポート生成完了 -> %s", report_path)
-        return {"report": (report_path, "txt", "report.human.v1")}
+        return {"report": ProducedArtifact(report_path, "txt", "report.human.v1")}
 
 
 # ---------------------------------------------------------------------------

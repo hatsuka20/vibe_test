@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -53,9 +54,9 @@ class RemoteEnvironment(Environment):
         return f"{self.user}@{self.host}" if self.user else self.host
 
     def run(self, command: list[str], *, cwd: Path | None = None) -> CommandResult:
-        remote_cmd = " ".join(command)
+        remote_cmd = " ".join(shlex.quote(c) for c in command)
         if cwd:
-            remote_cmd = f"cd {cwd} && {remote_cmd}"
+            remote_cmd = f"cd {shlex.quote(str(cwd))} && {remote_cmd}"
         ssh_command = ["ssh", self._target, remote_cmd]
         result = subprocess.run(ssh_command, capture_output=True)
         return CommandResult(

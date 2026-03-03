@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import time
+from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, Sequence
@@ -108,6 +109,13 @@ class ExecContext:
     env: Environment = field(default_factory=LocalEnvironment)
 
 
+@dataclass(frozen=True)
+class ProducedArtifact:
+    path: Path
+    format: str
+    schema: str
+
+
 class Process(Protocol):
     name: str
     requires: Sequence[str]
@@ -117,7 +125,24 @@ class Process(Protocol):
 
     def params(self) -> dict[str, Any]: ...
 
-    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, tuple[Path, str, str]]: ...
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]: ...
+
+
+@dataclass
+class ProcessBase(ABC):
+    """Process の基底クラス. 共通フィールドのデフォルトを提供する."""
+
+    name: str = ""
+    version: str = "0.0.0"
+    requires: list[str] = field(default_factory=list)
+    optional: list[OptionalInput] = field(default_factory=list)
+    produces: list[str] = field(default_factory=list)
+
+    def params(self) -> dict[str, Any]:
+        return {}
+
+    @abstractmethod
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]: ...
 
 
 def compute_cache_key(process: Process, ctx: RunContext) -> str:
@@ -189,14 +214,14 @@ class Pipeline:
 
             produced = proc.run(ctx, exec_ctx)
 
-            for key, (path, fmt, schema) in produced.items():
-                sha = sha256_file(path)
+            for key, part in produced.items():
+                sha = sha256_file(part.path)
                 ctx.put(
                     Artifact(
                         key=key,
-                        path=str(path),
-                        format=fmt,
-                        schema=schema,
+                        path=str(part.path),
+                        format=part.format,
+                        schema=part.schema,
                         producer=proc.name,
                         cache_key=ck,
                         sha256=sha,

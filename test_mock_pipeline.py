@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -46,17 +47,29 @@ def exec_ctx(tmp_path: Path, dry_env: DryRunEnvironment) -> ExecContext:
     )
 
 
-def _put_dummy_artifact(ctx: RunContext, key: str, path: Path, fmt: str, schema: str) -> None:
-    """テスト用のダミー Artifact を RunContext に登録する."""
-    ctx.artifacts[key] = Artifact(
-        key=key,
-        path=str(path),
-        format=fmt,
-        schema=schema,
-        producer="test",
-        cache_key="dummy",
-        sha256="dummy",
-    )
+@pytest.fixture()
+def put_artifact(
+    run_ctx: RunContext, exec_ctx: ExecContext,
+) -> Callable[..., Path]:
+    """テスト用アーティファクトをファイル作成 + RunContext 登録する fixture factory."""
+
+    def _put(
+        key: str, filename: str, fmt: str, schema: str, *, content: bytes = b"MOCK",
+    ) -> Path:
+        path = exec_ctx.out_dir / filename
+        path.write_bytes(content)
+        run_ctx.artifacts[key] = Artifact(
+            key=key,
+            path=str(path),
+            format=fmt,
+            schema=schema,
+            producer="test",
+            cache_key="dummy",
+            sha256="dummy",
+        )
+        return path
+
+    return _put
 
 
 # ===========================================================================
@@ -107,11 +120,11 @@ class TestDownloadModel:
         result = proc.run(run_ctx, exec_ctx)
 
         assert "model" in result
-        path, fmt, schema = result["model"]
-        assert path.exists()
-        assert path.stat().st_size > 0
-        assert fmt == "onnx"
-        assert schema == "model.onnx.v1"
+        art = result["model"]
+        assert art.path.exists()
+        assert art.path.stat().st_size > 0
+        assert art.format == "onnx"
+        assert art.schema == "model.onnx.v1"
 
     def test_invokes_curl_via_env(self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment) -> None:
         proc = DownloadModel(url="https://example.com/test.onnx")
@@ -137,26 +150,25 @@ class TestDownloadModel:
 # Process B: CompileModel
 # ===========================================================================
 class TestCompileModel:
-    def test_produces_cpp_file(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        model_path = exec_ctx.out_dir / "dummy.onnx"
-        model_path.write_bytes(b"MOCK")
-        _put_dummy_artifact(run_ctx, "model", model_path, "onnx", "model.onnx.v1")
+    def test_produces_cpp_file(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
 
         proc = CompileModel()
         result = proc.run(run_ctx, exec_ctx)
 
         assert "compiled_model" in result
-        path, fmt, schema = result["compiled_model"]
-        assert path.exists()
-        assert fmt == "cpp"
-        assert schema == "compiled.cpp.v1"
+        art = result["compiled_model"]
+        assert art.path.exists()
+        assert art.format == "cpp"
+        assert art.schema == "compiled.cpp.v1"
 
     def test_invokes_compiler_via_env(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+        dry_env: DryRunEnvironment, put_artifact: Callable,
     ) -> None:
-        model_path = exec_ctx.out_dir / "dummy.onnx"
-        model_path.write_bytes(b"MOCK")
-        _put_dummy_artifact(run_ctx, "model", model_path, "onnx", "model.onnx.v1")
+        put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
 
         proc = CompileModel(optimization_level=3)
         proc.run(run_ctx, exec_ctx)
@@ -166,15 +178,15 @@ class TestCompileModel:
         assert cmd[0] == "model-compiler"
         assert "-O3" in cmd
 
-    def test_cpp_contains_source_reference(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        model_path = exec_ctx.out_dir / "dummy.onnx"
-        model_path.write_bytes(b"MOCK")
-        _put_dummy_artifact(run_ctx, "model", model_path, "onnx", "model.onnx.v1")
+    def test_cpp_contains_source_reference(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        model_path = put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
 
         proc = CompileModel(optimization_level=3)
         result = proc.run(run_ctx, exec_ctx)
 
-        content = result["compiled_model"][0].read_text(encoding="utf-8")
+        content = result["compiled_model"].path.read_text(encoding="utf-8")
         assert str(model_path) in content
         assert "optimization_level = 3" in content
 
@@ -187,21 +199,21 @@ class TestCompileModel:
 # Process C: RunModel
 # ===========================================================================
 class TestRunModel:
-    def test_produces_valid_profile_json(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        cpp_path = exec_ctx.out_dir / "model.cpp"
-        cpp_path.write_text("// mock", encoding="utf-8")
-        _put_dummy_artifact(run_ctx, "compiled_model", cpp_path, "cpp", "compiled.cpp.v1")
+    def test_produces_valid_profile_json(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
 
         proc = RunModel()
         result = proc.run(run_ctx, exec_ctx)
 
         assert "profile" in result
-        path, fmt, schema = result["profile"]
-        assert path.exists()
-        assert fmt == "json"
-        assert schema == "profile.runtime.v1"
+        art = result["profile"]
+        assert art.path.exists()
+        assert art.format == "json"
+        assert art.schema == "profile.runtime.v1"
 
-        profile = json.loads(path.read_text(encoding="utf-8"))
+        profile = json.loads(art.path.read_text(encoding="utf-8"))
         assert "latency_ms" in profile
         assert "throughput_items_per_sec" in profile
         assert "memory_peak_mb" in profile
@@ -209,11 +221,10 @@ class TestRunModel:
         assert len(profile["ops"]) > 0
 
     def test_invokes_runtime_via_env(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+        dry_env: DryRunEnvironment, put_artifact: Callable,
     ) -> None:
-        cpp_path = exec_ctx.out_dir / "model.cpp"
-        cpp_path.write_text("// mock", encoding="utf-8")
-        _put_dummy_artifact(run_ctx, "compiled_model", cpp_path, "cpp", "compiled.cpp.v1")
+        put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
 
         proc = RunModel(num_iterations=500)
         proc.run(run_ctx, exec_ctx)
@@ -223,15 +234,15 @@ class TestRunModel:
         assert cmd[0] == "model-runtime"
         assert "500" in cmd
 
-    def test_profile_reflects_iterations(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        cpp_path = exec_ctx.out_dir / "model.cpp"
-        cpp_path.write_text("// mock", encoding="utf-8")
-        _put_dummy_artifact(run_ctx, "compiled_model", cpp_path, "cpp", "compiled.cpp.v1")
+    def test_profile_reflects_iterations(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
 
         proc = RunModel(num_iterations=500)
         result = proc.run(run_ctx, exec_ctx)
 
-        profile = json.loads(result["profile"][0].read_text(encoding="utf-8"))
+        profile = json.loads(result["profile"].path.read_text(encoding="utf-8"))
         assert profile["iterations"] == 500
 
     def test_requires_compiled_model(self) -> None:
@@ -244,7 +255,7 @@ class TestRunModel:
 # ===========================================================================
 class TestFormatProfile:
     @pytest.fixture()
-    def _setup_profile(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+    def _setup_profile(self, put_artifact: Callable, exec_ctx: ExecContext) -> None:
         profile_data = {
             "source": "model.cpp",
             "iterations": 100,
@@ -255,9 +266,10 @@ class TestFormatProfile:
                 {"name": "conv2d_1", "time_ms": 0.8, "memory_mb": 32.0},
             ],
         }
-        profile_path = exec_ctx.out_dir / "profile.json"
-        profile_path.write_text(json.dumps(profile_data), encoding="utf-8")
-        _put_dummy_artifact(run_ctx, "profile", profile_path, "json", "profile.runtime.v1")
+        put_artifact(
+            "profile", "profile.json", "json", "profile.runtime.v1",
+            content=json.dumps(profile_data).encode(),
+        )
 
     @pytest.mark.usefixtures("_setup_profile")
     def test_produces_human_readable_report(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
@@ -265,17 +277,17 @@ class TestFormatProfile:
         result = proc.run(run_ctx, exec_ctx)
 
         assert "report" in result
-        path, fmt, schema = result["report"]
-        assert path.exists()
-        assert fmt == "txt"
-        assert schema == "report.human.v1"
+        art = result["report"]
+        assert art.path.exists()
+        assert art.format == "txt"
+        assert art.schema == "report.human.v1"
 
     @pytest.mark.usefixtures("_setup_profile")
     def test_report_contains_key_sections(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
         proc = FormatProfile()
         result = proc.run(run_ctx, exec_ctx)
 
-        report = result["report"][0].read_text(encoding="utf-8")
+        report = result["report"].path.read_text(encoding="utf-8")
         assert "Model Performance Report" in report
         assert "Latency" in report
         assert "Throughput" in report
@@ -294,3 +306,7 @@ class TestFormatProfile:
     def test_requires_profile(self) -> None:
         proc = FormatProfile()
         assert proc.requires == ["profile"]
+
+    def test_inherits_default_params(self) -> None:
+        proc = FormatProfile()
+        assert proc.params() == {}
