@@ -28,16 +28,22 @@ class CommandResult:
             )
 
 
+class CommandBuilder(ABC):
+    @abstractmethod
+    def build(self) -> list[str]: ...
+
+
 class Environment(ABC):
     @abstractmethod
-    def run(self, command: list[str], *, cwd: Path | None = None) -> CommandResult: ...
+    def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult: ...
 
 
 class LocalEnvironment(Environment):
-    def run(self, command: list[str], *, cwd: Path | None = None) -> CommandResult:
-        result = subprocess.run(command, cwd=cwd, capture_output=True)
+    def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
+        argv = command.build()
+        result = subprocess.run(argv, cwd=cwd, capture_output=True)
         return CommandResult(
-            command=command,
+            command=argv,
             returncode=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
@@ -53,14 +59,15 @@ class RemoteEnvironment(Environment):
     def _target(self) -> str:
         return f"{self.user}@{self.host}" if self.user else self.host
 
-    def run(self, command: list[str], *, cwd: Path | None = None) -> CommandResult:
-        remote_cmd = " ".join(shlex.quote(c) for c in command)
+    def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
+        argv = command.build()
+        remote_cmd = " ".join(shlex.quote(c) for c in argv)
         if cwd:
             remote_cmd = f"cd {shlex.quote(str(cwd))} && {remote_cmd}"
         ssh_command = ["ssh", self._target, remote_cmd]
         result = subprocess.run(ssh_command, capture_output=True)
         return CommandResult(
-            command=command,
+            command=argv,
             returncode=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
@@ -71,18 +78,15 @@ class DryRunEnvironment(Environment):
     """コマンドを記録するだけで実行しない. テストや検証用."""
 
     def __init__(self) -> None:
-        self.history: list[list[str]] = []
+        self.history: list[CommandBuilder] = []
 
-    def run(self, command: list[str], *, cwd: Path | None = None) -> CommandResult:
+    def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
         self.history.append(command)
         return CommandResult(
-            command=command,
+            command=command.build(),
             returncode=0,
             stdout=b"",
             stderr=b"",
         )
 
 
-class CommandBuilder(ABC):
-    @abstractmethod
-    def build(self) -> list[str]: ...

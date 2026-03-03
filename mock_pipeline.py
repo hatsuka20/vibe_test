@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from environment import CommandBuilder, DryRunEnvironment
-from main import (
+from pipeline import (
     ExecContext,
     Pipeline,
     ProcessBase,
@@ -77,7 +77,7 @@ class DownloadModel(ProcessBase):
 
         cmd = CurlDownload(url=self.url, output=model_path)
         exec_ctx.logger.info("[A] モデルをダウンロード中: %s", self.url)
-        exec_ctx.env.run(cmd.build())
+        exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         model_path.write_bytes(b"\x00MOCK_ONNX_MODEL_WEIGHTS" * 64)
@@ -111,7 +111,7 @@ class CompileModel(ProcessBase):
             optimization_level=self.optimization_level,
         )
         exec_ctx.logger.info("[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level)
-        exec_ctx.env.run(cmd.build())
+        exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         cpp_content = f"""\
@@ -160,7 +160,7 @@ class RunModel(ProcessBase):
             num_iterations=self.num_iterations,
         )
         exec_ctx.logger.info("[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations)
-        exec_ctx.env.run(cmd.build())
+        exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         profile_data = {
@@ -255,7 +255,7 @@ def main() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
     env = DryRunEnvironment()
-    ctx = RunContext(run_dir=run_dir)
+    ctx = RunContext.load(run_dir=run_dir)
     exec_ctx = ExecContext(out_dir=out_dir, temp_dir=temp_dir, logger=logger, env=env)
 
     pipeline = Pipeline([
@@ -269,7 +269,7 @@ def main() -> None:
 
     logger.info("Manifest: %s", ctx.manifest_path)
     for cmd in env.history:
-        logger.info("Command: %s", " ".join(cmd))
+        logger.info("Command: %s", " ".join(cmd.build()))
 
 
 if __name__ == "__main__":

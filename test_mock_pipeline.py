@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from environment import DryRunEnvironment
-from main import Artifact, ExecContext, RunContext
+from pipeline import Artifact, ExecContext, RunContext
 from mock_pipeline import (
     CompileModel,
     CurlDownload,
@@ -131,9 +131,10 @@ class TestDownloadModel:
         proc.run(run_ctx, exec_ctx)
 
         assert len(dry_env.history) == 1
-        cmd = dry_env.history[0]
-        assert cmd[0] == "curl"
-        assert "https://example.com/test.onnx" in cmd
+        assert dry_env.history[0] == CurlDownload(
+            url="https://example.com/test.onnx",
+            output=exec_ctx.out_dir / "resnet50.onnx",
+        )
 
     def test_params_contains_url(self) -> None:
         proc = DownloadModel(url="https://example.com/custom.onnx")
@@ -168,15 +169,17 @@ class TestCompileModel:
         self, run_ctx: RunContext, exec_ctx: ExecContext,
         dry_env: DryRunEnvironment, put_artifact: Callable,
     ) -> None:
-        put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
+        model_path = put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
 
         proc = CompileModel(optimization_level=3)
         proc.run(run_ctx, exec_ctx)
 
         assert len(dry_env.history) == 1
-        cmd = dry_env.history[0]
-        assert cmd[0] == "model-compiler"
-        assert "-O3" in cmd
+        assert dry_env.history[0] == ModelCompile(
+            model_path=model_path,
+            output=exec_ctx.out_dir / "model_compiled.cpp",
+            optimization_level=3,
+        )
 
     def test_cpp_contains_source_reference(
         self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
@@ -224,15 +227,17 @@ class TestRunModel:
         self, run_ctx: RunContext, exec_ctx: ExecContext,
         dry_env: DryRunEnvironment, put_artifact: Callable,
     ) -> None:
-        put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
+        compiled_path = put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
 
         proc = RunModel(num_iterations=500)
         proc.run(run_ctx, exec_ctx)
 
         assert len(dry_env.history) == 1
-        cmd = dry_env.history[0]
-        assert cmd[0] == "model-runtime"
-        assert "500" in cmd
+        assert dry_env.history[0] == RuntimeExec(
+            compiled_path=compiled_path,
+            profile_output=exec_ctx.out_dir / "profile.json",
+            num_iterations=500,
+        )
 
     def test_profile_reflects_iterations(
         self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
