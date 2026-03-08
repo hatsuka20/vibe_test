@@ -12,6 +12,13 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class MachineSpec:
+    """ターゲットマシンの接続情報."""
+    host: str
+    user: str = "root"
+
+
+@dataclass(frozen=True)
 class ChipProfile:
     """チップ固有の内部パラメータ."""
     chip: str
@@ -19,6 +26,7 @@ class ChipProfile:
     compile_flags: list[str] # チップ固有のコンパイラフラグ
     runtime_lib: str         # 実行時にリンクするライブラリ
     runtime_flags: list[str] # チップ固有のランタイムフラグ
+    machine: MachineSpec     # 実行先マシン
 
 
 # チップ名 → 内部パラメータの静的マッピング
@@ -29,6 +37,7 @@ _CHIP_PROFILES: dict[str, ChipProfile] = {
         compile_flags=["--target=chipx"],
         runtime_lib="libChipXRuntime.so",
         runtime_flags=["--device=chipx"],
+        machine=MachineSpec(host="m1.example.com"),
     ),
     "chipY": ChipProfile(
         chip="chipY",
@@ -36,6 +45,7 @@ _CHIP_PROFILES: dict[str, ChipProfile] = {
         compile_flags=["--target=chipy", "--fp16"],
         runtime_lib="libChipYRuntime.so",
         runtime_flags=["--device=chipy"],
+        machine=MachineSpec(host="m1.example.com"),
     ),
     "chipZ": ChipProfile(
         chip="chipZ",
@@ -43,6 +53,7 @@ _CHIP_PROFILES: dict[str, ChipProfile] = {
         compile_flags=["--target=chipz", "--int8"],
         runtime_lib="libChipZRuntime.so",
         runtime_flags=["--device=chipz"],
+        machine=MachineSpec(host="m2.example.com"),
     ),
 }
 
@@ -106,3 +117,8 @@ class Toolchain:
     @property
     def runtime_flags(self) -> list[str]:
         return self._profile.runtime_flags
+
+    @property
+    def machine(self) -> MachineSpec:
+        """ターゲットマシンの接続情報."""
+        return self._profile.machine

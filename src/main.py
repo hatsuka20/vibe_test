@@ -5,7 +5,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from environment import DryRunEnvironment
+from environment import DryRunEnvironment, RemoteEnvironment
 from pipeline import ExecContext, Gate, Map, Pipeline, PipelineHalted, Reduce, RunContext
 from processes import (
     AggregateProfile,
@@ -21,6 +21,7 @@ from toolchain import Toolchain
 class Args(argparse.Namespace):
     experiment_name: str
     recipe: str | None
+    dry_run: bool
 
 
 def _resolve_recipe(
@@ -64,6 +65,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="モックパイプラインの実行")
     parser.add_argument("experiment_name", help="実験名 (experiments/<name> に出力)")
     parser.add_argument("--recipe", default=None, help="テンプレートレシピのパス (初回のみ必須)")
+    parser.add_argument("--dry-run", action="store_true", default=True, help="DryRun モード (デフォルト)")
     args = parser.parse_args(namespace=Args())
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -80,7 +82,13 @@ def main() -> None:
     recipe, recipe_path = _resolve_recipe(template_path, base_dir, logger)
     toolchain = Toolchain(recipe.target.chip, recipe.target.toolset_version)
 
-    env = DryRunEnvironment()
+    machine = toolchain.machine
+    if args.dry_run:
+        env = DryRunEnvironment()
+    else:
+        env = RemoteEnvironment(host=machine.host, user=machine.user)
+    logger.info("ターゲット: chip=%s, machine=%s, env=%s", toolchain.chip, machine.host, type(env).__name__)
+
     ctx = RunContext.load(run_dir=run_dir)
     exec_ctx = ExecContext(out_dir=out_dir, temp_dir=temp_dir, logger=logger, env=env)
 

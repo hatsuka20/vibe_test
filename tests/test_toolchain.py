@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from toolchain import ChipProfile, Toolchain
+from toolchain import ChipProfile, MachineSpec, Toolchain
 
 
 class TestToolchain:
@@ -63,3 +63,21 @@ class TestToolsetVersion:
     def test_version_preserved(self) -> None:
         tc = Toolchain("chipX", toolset_version="2.41.5")
         assert tc.toolset_version == "2.41.5"
+
+
+class TestMachineMapping:
+    def test_chipX_runs_on_m1(self) -> None:
+        tc = Toolchain("chipX")
+        assert tc.machine.host == "m1.example.com"
+
+    def test_chipY_runs_on_m1(self) -> None:
+        tc = Toolchain("chipY")
+        assert tc.machine.host == "m1.example.com"
+
+    def test_chipZ_runs_on_m2(self) -> None:
+        tc = Toolchain("chipZ")
+        assert tc.machine.host == "m2.example.com"
+
+    def test_machine_has_user(self) -> None:
+        tc = Toolchain("chipX")
+        assert tc.machine.user == "root"
