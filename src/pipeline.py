@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Sequence
 
 from environment import CommandBuilder, CommandResult, Environment, LocalEnvironment
@@ -282,7 +283,7 @@ class Gate:
     check が False を返すと PipelineHalted を送出する.
     再実行時にキャッシュ済みステップをスキップし、Gate を再評価する.
     """
-    check: Any  # Callable[[RunContext], bool]  (dataclass + callable の型制約回避)
+    check: Callable[["RunContext"], bool]
     message: str = "Pipeline halted: gate condition not met."
 
 
