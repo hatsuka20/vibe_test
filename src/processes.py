@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from environment import CommandBuilder
 from pipeline import (
@@ -14,9 +13,7 @@ from pipeline import (
     ProducedArtifact,
     RunContext,
 )
-
-if TYPE_CHECKING:
-    from recipe import Recipe
+from recipe import Recipe
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +64,7 @@ class RuntimeExec(CommandBuilder):
 # ---------------------------------------------------------------------------
 @dataclass
 class DownloadModel(ProcessBase):
-    recipe: Recipe = field(default_factory=lambda: __import__("recipe").Recipe())
+    recipe: Recipe = field(default_factory=Recipe)
     recipe_path: Path | None = None
     version: str = "1.0.0"
 
