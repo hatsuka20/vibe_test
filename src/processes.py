@@ -13,7 +13,7 @@ from pipeline import (
     ProducedArtifact,
     RunContext,
 )
-from recipe import Recipe
+from recipe import CompileOptions, Recipe, RunOptions
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ class DownloadModel(ProcessBase):
 @dataclass
 class CompileModel(ProcessBase):
     model_name: str = "default"
-    optimization_level: int = 2
+    compile_options: CompileOptions = field(default_factory=CompileOptions)
     compiler_path: str = "model-compiler"
     compile_lib: str = ""
     compile_flags: tuple[str, ...] = ()
@@ -146,7 +146,7 @@ class CompileModel(ProcessBase):
 
     def params(self) -> dict:
         return {
-            "optimization_level": self.optimization_level,
+            **self.compile_options.model_dump(),
             "compiler_path": self.compiler_path,
             "compile_lib": self.compile_lib,
             "compile_flags": list(self.compile_flags),
@@ -159,20 +159,20 @@ class CompileModel(ProcessBase):
         cmd = ModelCompile(
             model_path=model_art.path,
             output=cpp_path,
-            optimization_level=self.optimization_level,
+            optimization_level=self.compile_options.optimization_level,
             compiler_path=self.compiler_path,
             compile_lib=self.compile_lib,
             compile_flags=self.compile_flags,
         )
         exec_ctx.logger.info(
-            "[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level,
+            "[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.compile_options.optimization_level,
         )
         exec_ctx.env.run(cmd, cwd=exec_ctx.temp_dir)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         cpp_content = f"""\
 // Auto-generated from {model_art.path}
-// optimization_level = {self.optimization_level}
+// optimization_level = {self.compile_options.optimization_level}
 #include <cstdint>
 
 namespace model {{
@@ -199,7 +199,7 @@ namespace model {{
 @dataclass
 class RunModel(ProcessBase):
     model_name: str = "default"
-    num_iterations: int = 100
+    run_options: RunOptions = field(default_factory=RunOptions)
     runtime_path: str = "model-runtime"
     runtime_lib: str = ""
     runtime_flags: tuple[str, ...] = ()
@@ -212,7 +212,7 @@ class RunModel(ProcessBase):
 
     def params(self) -> dict:
         return {
-            "num_iterations": self.num_iterations,
+            **self.run_options.model_dump(),
             "runtime_path": self.runtime_path,
             "runtime_lib": self.runtime_lib,
             "runtime_flags": list(self.runtime_flags),
@@ -225,20 +225,20 @@ class RunModel(ProcessBase):
         cmd = RuntimeExec(
             compiled_path=compiled_art.path,
             profile_output=profile_path,
-            num_iterations=self.num_iterations,
+            num_iterations=self.run_options.num_iterations,
             runtime_path=self.runtime_path,
             runtime_lib=self.runtime_lib,
             runtime_flags=self.runtime_flags,
         )
         exec_ctx.logger.info(
-            "[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations,
+            "[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.run_options.num_iterations,
         )
         exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         profile_data = {
             "source": str(compiled_art.path),
-            "iterations": self.num_iterations,
+            "iterations": self.run_options.num_iterations,
             "latency_ms": {"min": 1.2, "max": 5.8, "mean": 2.4, "p99": 4.9},
             "throughput_items_per_sec": 416.7,
             "memory_peak_mb": 128.5,

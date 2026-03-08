@@ -19,7 +19,7 @@ from processes import (
     RunModel,
     RuntimeExec,
 )
-from recipe import Recipe
+from recipe import CompileOptions, Recipe, RunOptions
 
 
 # NOTE: CommandBuilder.build() の単体テストは省略。
@@ -144,7 +144,7 @@ class TestCompileModel:
     ) -> None:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(model_name="resnet", optimization_level=3)
+        proc = CompileModel(model_name="resnet", compile_options=CompileOptions(optimization_level=3))
         proc.run(run_ctx, exec_ctx)
 
         assert ModelCompile(
@@ -158,7 +158,7 @@ class TestCompileModel:
     ) -> None:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(model_name="resnet", optimization_level=3)
+        proc = CompileModel(model_name="resnet", compile_options=CompileOptions(optimization_level=3))
         result = proc.run(run_ctx, exec_ctx)
 
         content = result["compiled_model.resnet"].path.read_text(encoding="utf-8")
@@ -190,7 +190,7 @@ class TestCompileModel:
 
         proc = CompileModel(
             model_name="resnet",
-            optimization_level=2,
+            compile_options=CompileOptions(optimization_level=2),
             compile_lib="libChipY.so",
             compile_flags=("--target=chipy", "--fp16"),
         )
@@ -249,7 +249,7 @@ class TestRunModel:
     ) -> None:
         compiled_path = put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        proc = RunModel(model_name="resnet", num_iterations=500)
+        proc = RunModel(model_name="resnet", run_options=RunOptions(num_iterations=500))
         proc.run(run_ctx, exec_ctx)
 
         assert RuntimeExec(
@@ -263,7 +263,7 @@ class TestRunModel:
     ) -> None:
         put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        proc = RunModel(model_name="resnet", num_iterations=500)
+        proc = RunModel(model_name="resnet", run_options=RunOptions(num_iterations=500))
         result = proc.run(run_ctx, exec_ctx)
 
         profile = json.loads(result["profile.resnet"].path.read_text(encoding="utf-8"))
@@ -282,7 +282,7 @@ class TestRunModel:
 
         proc = RunModel(
             model_name="resnet",
-            num_iterations=100,
+            run_options=RunOptions(num_iterations=100),
             runtime_lib="libChipYRuntime.so",
             runtime_flags=("--device=chipy",),
         )
