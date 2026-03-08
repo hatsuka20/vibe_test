@@ -81,3 +81,12 @@ class TestMachineMapping:
     def test_machine_has_user(self) -> None:
         tc = Toolchain("chipX")
         assert tc.machine.user == "root"
+
+    def test_default_port(self) -> None:
+        tc = Toolchain("chipX")
+        assert tc.machine.port == 22102
+
+    def test_custom_port(self) -> None:
+        tc = Toolchain("chipX", port=22108)
+        assert tc.machine.port == 22108
+        assert tc.machine.host == "m1.example.com"

@@ -18,6 +18,7 @@ class TargetConfig(BaseModel):
     """ターゲット環境の指定."""
     chip: str = "chipX"
     toolset_version: str = "2.40.0"
+    port: int = 22102
 
 
 class ModelConfig(BaseModel):

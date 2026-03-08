@@ -16,6 +16,7 @@ class MachineSpec:
     """ターゲットマシンの接続情報."""
     host: str
     user: str = "root"
+    port: int = 22102
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def _resolve_tools_dir(toolset_version: str) -> Path:
 class Toolchain:
     """チップ名 + ツールセットバージョンからパラメータを解決する."""
 
-    def __init__(self, chip: str, toolset_version: str = "2.40.0") -> None:
+    def __init__(self, chip: str, toolset_version: str = "2.40.0", port: int = 22102) -> None:
         if chip not in _CHIP_PROFILES:
             raise ValueError(
                 f"Unknown chip: {chip!r}. "
@@ -78,6 +79,7 @@ class Toolchain:
         self._profile = _CHIP_PROFILES[chip]
         self._toolset_version = toolset_version
         self._tools_dir = _resolve_tools_dir(toolset_version)
+        self._port = port
 
     @property
     def chip(self) -> str:
@@ -120,5 +122,6 @@ class Toolchain:
 
     @property
     def machine(self) -> MachineSpec:
-        """ターゲットマシンの接続情報."""
-        return self._profile.machine
+        """ターゲットマシンの接続情報 (ユーザー指定ポートを反映)."""
+        m = self._profile.machine
+        return MachineSpec(host=m.host, user=m.user, port=self._port)
