@@ -33,6 +33,7 @@ class ModelCompile(CommandBuilder):
     model_path: Path
     output: Path
     optimization_level: int
+    config_path: Path | None = None
     compiler_path: str = "model-compiler"
     compile_lib: str = ""
     compile_flags: tuple[str, ...] = ()
@@ -42,6 +43,8 @@ class ModelCompile(CommandBuilder):
         if self.compile_lib:
             cmd += ["-l", self.compile_lib]
         cmd += list(self.compile_flags)
+        if self.config_path:
+            cmd += ["--config", str(self.config_path)]
         cmd += [
             f"-O{self.optimization_level}",
             "-o", str(self.output),
@@ -128,12 +131,79 @@ class DownloadModel(ProcessBase):
 
 
 # ---------------------------------------------------------------------------
-# Process B: モデルを中間形式 (cpp) にコンパイルする (mock)
+# Process B1: チップ固有のコンパイル設定ファイルを生成する (mock)
+#   CompileOptions の内容をチップごとのフォーマットで config ファイルに変換
+# ---------------------------------------------------------------------------
+_CONFIG_GENERATORS: dict[str, str] = {
+    "chipX": "ini",
+    "chipY": "json",
+    "chipZ": "json",
+}
+
+
+@dataclass
+class GenerateConfig(ProcessBase):
+    model_name: str = "default"
+    compile_options: CompileOptions = field(default_factory=CompileOptions)
+    chip: str = "chipX"
+    version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        self.name = f"generate_config_{self.model_name}"
+        self.requires = [f"model.{self.model_name}"]
+        self.produces = [f"config.{self.model_name}"]
+
+    def params(self) -> dict:
+        return {
+            **self.compile_options.model_dump(),
+            "chip": self.chip,
+        }
+
+    def _generate_ini(self) -> str:
+        """chipX 向け: INI 形式の config を生成."""
+        lines = [
+            "[compile]",
+            f"memory_mode = {self.compile_options.memory_mode}",
+        ]
+        if self.compile_options.quantization_bits is not None:
+            lines.append(f"quantization_bits = {self.compile_options.quantization_bits}")
+        return "\n".join(lines) + "\n"
+
+    def _generate_json(self) -> str:
+        """chipY/chipZ 向け: JSON 形式の config を生成."""
+        data: dict = {
+            "memory_mode": self.compile_options.memory_mode,
+        }
+        if self.compile_options.quantization_bits is not None:
+            data["quantization"] = {"bits": self.compile_options.quantization_bits}
+        return json.dumps(data, indent=2)
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        fmt = _CONFIG_GENERATORS.get(self.chip, "json")
+
+        if fmt == "ini":
+            content = self._generate_ini()
+            ext = "ini"
+        else:
+            content = self._generate_json()
+            ext = "json"
+
+        config_path = exec_ctx.out_dir / f"{self.model_name}_config.{ext}"
+        config_path.write_text(content, encoding="utf-8")
+
+        exec_ctx.logger.info("[B1] config 生成完了 -> %s (%s形式)", config_path, fmt)
+        return {
+            f"config.{self.model_name}": ProducedArtifact(config_path, ext, f"config.{fmt}.v1"),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Process B2: モデルを中間形式 (cpp) にコンパイルする (mock)
 # ---------------------------------------------------------------------------
 @dataclass
 class CompileModel(ProcessBase):
     model_name: str = "default"
-    compile_options: CompileOptions = field(default_factory=CompileOptions)
+    optimization_level: int = 2
     compiler_path: str = "model-compiler"
     compile_lib: str = ""
     compile_flags: tuple[str, ...] = ()
@@ -141,12 +211,12 @@ class CompileModel(ProcessBase):
 
     def __post_init__(self) -> None:
         self.name = f"compile_{self.model_name}"
-        self.requires = [f"model.{self.model_name}"]
+        self.requires = [f"model.{self.model_name}", f"config.{self.model_name}"]
         self.produces = [f"compiled_model.{self.model_name}"]
 
     def params(self) -> dict:
         return {
-            **self.compile_options.model_dump(),
+            "optimization_level": self.optimization_level,
             "compiler_path": self.compiler_path,
             "compile_lib": self.compile_lib,
             "compile_flags": list(self.compile_flags),
@@ -154,25 +224,29 @@ class CompileModel(ProcessBase):
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         model_art = ctx.get(f"model.{self.model_name}")
+        config_art = ctx.get(f"config.{self.model_name}")
         cpp_path = exec_ctx.out_dir / f"{self.model_name}_compiled.cpp"
 
         cmd = ModelCompile(
             model_path=model_art.path,
             output=cpp_path,
-            optimization_level=self.compile_options.optimization_level,
+            optimization_level=self.optimization_level,
+            config_path=config_art.path,
             compiler_path=self.compiler_path,
             compile_lib=self.compile_lib,
             compile_flags=self.compile_flags,
         )
         exec_ctx.logger.info(
-            "[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.compile_options.optimization_level,
+            "[B2] モデルをコンパイル中: %s (O%d, config=%s)",
+            model_art.path, self.optimization_level, config_art.path,
         )
         exec_ctx.env.run(cmd, cwd=exec_ctx.temp_dir)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         cpp_content = f"""\
 // Auto-generated from {model_art.path}
-// optimization_level = {self.compile_options.optimization_level}
+// config = {config_art.path}
+// optimization_level = {self.optimization_level}
 #include <cstdint>
 
 namespace model {{
@@ -187,7 +261,7 @@ namespace model {{
 """
         cpp_path.write_text(cpp_content, encoding="utf-8")
 
-        exec_ctx.logger.info("[B] コンパイル完了 -> %s", cpp_path)
+        exec_ctx.logger.info("[B2] コンパイル完了 -> %s", cpp_path)
         return {
             f"compiled_model.{self.model_name}": ProducedArtifact(cpp_path, "cpp", "compiled.cpp.v1"),
         }

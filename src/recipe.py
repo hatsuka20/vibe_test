@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 class CompileOptions(BaseModel):
     optimization_level: int = 2
+    memory_mode: str = "normal"       # normal / low_power / high_performance
+    quantization_bits: int | None = None  # None = 量子化なし, 8 / 16 etc.
 
 
 class RunOptions(BaseModel):

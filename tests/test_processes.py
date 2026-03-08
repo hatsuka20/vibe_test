@@ -15,6 +15,7 @@ from processes import (
     CurlDownload,
     DownloadModel,
     FormatProfile,
+    GenerateConfig,
     ModelCompile,
     RunModel,
     RuntimeExec,
@@ -122,9 +123,88 @@ class TestDownloadModel:
 
 
 # ===========================================================================
-# Process B: CompileModel
+# Process B1: GenerateConfig
+# ===========================================================================
+class TestGenerateConfig:
+    def test_chipX_generates_ini(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+
+        proc = GenerateConfig(model_name="resnet", chip="chipX")
+        result = proc.run(run_ctx, exec_ctx)
+
+        assert "config.resnet" in result
+        art = result["config.resnet"]
+        assert art.format == "ini"
+        content = art.path.read_text(encoding="utf-8")
+        assert "[compile]" in content
+        assert "memory_mode = normal" in content
+
+    def test_chipY_generates_json(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+
+        proc = GenerateConfig(model_name="resnet", chip="chipY")
+        result = proc.run(run_ctx, exec_ctx)
+
+        art = result["config.resnet"]
+        assert art.format == "json"
+        data = json.loads(art.path.read_text(encoding="utf-8"))
+        assert data["memory_mode"] == "normal"
+
+    def test_quantization_in_ini(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+
+        opts = CompileOptions(quantization_bits=8)
+        proc = GenerateConfig(model_name="resnet", compile_options=opts, chip="chipX")
+        result = proc.run(run_ctx, exec_ctx)
+
+        content = result["config.resnet"].path.read_text(encoding="utf-8")
+        assert "quantization_bits = 8" in content
+
+    def test_quantization_in_json(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+
+        opts = CompileOptions(quantization_bits=16)
+        proc = GenerateConfig(model_name="resnet", compile_options=opts, chip="chipY")
+        result = proc.run(run_ctx, exec_ctx)
+
+        data = json.loads(result["config.resnet"].path.read_text(encoding="utf-8"))
+        assert data["quantization"]["bits"] == 16
+
+    def test_process_fields(self) -> None:
+        proc = GenerateConfig(model_name="vgg")
+        assert proc.name == "generate_config_vgg"
+        assert proc.requires == ["model.vgg"]
+        assert proc.produces == ["config.vgg"]
+
+    def test_params_contains_chip_and_options(self) -> None:
+        opts = CompileOptions(optimization_level=3, memory_mode="low_power")
+        proc = GenerateConfig(model_name="resnet", compile_options=opts, chip="chipZ")
+        params = proc.params()
+        assert params["chip"] == "chipZ"
+        assert params["memory_mode"] == "low_power"
+        assert params["optimization_level"] == 3
+
+
+# ===========================================================================
+# Process B2: CompileModel
 # ===========================================================================
 class TestCompileModel:
+    @pytest.fixture(autouse=True)
+    def _setup_config(self, put_artifact: Callable) -> None:
+        """CompileModel が必要とする config アーティファクトを事前登録."""
+        put_artifact(
+            "config.resnet", "resnet_config.ini", "ini", "config.ini.v1",
+            content=b"[compile]\nmemory_mode = normal\n",
+        )
+
     def test_produces_cpp_file(
         self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
     ) -> None:
@@ -138,19 +218,21 @@ class TestCompileModel:
         assert art.path.exists()
         assert art.format == "cpp"
 
-    def test_invokes_compiler_via_env(
+    def test_invokes_compiler_with_config(
         self, run_ctx: RunContext, exec_ctx: ExecContext,
         dry_env: DryRunEnvironment, put_artifact: Callable,
     ) -> None:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+        config_path = exec_ctx.out_dir / "resnet_config.ini"
 
-        proc = CompileModel(model_name="resnet", compile_options=CompileOptions(optimization_level=3))
+        proc = CompileModel(model_name="resnet", optimization_level=3)
         proc.run(run_ctx, exec_ctx)
 
         assert ModelCompile(
             model_path=model_path,
             output=exec_ctx.out_dir / "resnet_compiled.cpp",
             optimization_level=3,
+            config_path=config_path,
         ) in dry_env.history
 
     def test_cpp_contains_source_reference(
@@ -158,16 +240,16 @@ class TestCompileModel:
     ) -> None:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(model_name="resnet", compile_options=CompileOptions(optimization_level=3))
+        proc = CompileModel(model_name="resnet", optimization_level=3)
         result = proc.run(run_ctx, exec_ctx)
 
         content = result["compiled_model.resnet"].path.read_text(encoding="utf-8")
         assert str(model_path) in content
         assert "optimization_level = 3" in content
 
-    def test_requires_model(self) -> None:
+    def test_requires_model_and_config(self) -> None:
         proc = CompileModel(model_name="vgg")
-        assert proc.requires == ["model.vgg"]
+        assert proc.requires == ["model.vgg", "config.vgg"]
 
     def test_uses_temp_dir_as_cwd(
         self, run_ctx: RunContext, exec_ctx: ExecContext,
@@ -187,10 +269,11 @@ class TestCompileModel:
     ) -> None:
         """チップ固有のライブラリとフラグが CommandBuilder に渡される."""
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+        config_path = exec_ctx.out_dir / "resnet_config.ini"
 
         proc = CompileModel(
             model_name="resnet",
-            compile_options=CompileOptions(optimization_level=2),
+            optimization_level=2,
             compile_lib="libChipY.so",
             compile_flags=("--target=chipy", "--fp16"),
         )
@@ -200,20 +283,24 @@ class TestCompileModel:
             model_path=model_path,
             output=exec_ctx.out_dir / "resnet_compiled.cpp",
             optimization_level=2,
+            config_path=config_path,
             compile_lib="libChipY.so",
             compile_flags=("--target=chipy", "--fp16"),
         ) in dry_env.history
 
-    def test_chip_specific_build_command(self) -> None:
-        """チップ固有パラメータがビルドコマンドに反映される."""
+    def test_config_path_in_build_command(self) -> None:
+        """--config がビルドコマンドに反映される."""
         cmd = ModelCompile(
             model_path=Path("model.onnx"),
             output=Path("out.cpp"),
             optimization_level=2,
+            config_path=Path("config.ini"),
             compile_lib="libChipX.so",
             compile_flags=("--target=chipx",),
         )
         argv = cmd.build()
+        assert "--config" in argv
+        assert "config.ini" in argv
         assert "-l" in argv
         assert "libChipX.so" in argv
         assert "--target=chipx" in argv

@@ -12,6 +12,7 @@ from processes import (
     CompileModel,
     DownloadModel,
     FormatProfile,
+    GenerateConfig,
     RunModel,
 )
 from recipe import Recipe
@@ -96,8 +97,12 @@ def main() -> None:
                 "各モデルの設定を確認・編集してから再実行してください。"
             ),
         ),
-        Map(CompileModel, kwargs_factory=lambda name: {
+        Map(GenerateConfig, kwargs_factory=lambda name: {
             "compile_options": recipe.resolve_compile_options(name),
+            "chip": toolchain.chip,
+        }),
+        Map(CompileModel, kwargs_factory=lambda name: {
+            "optimization_level": recipe.resolve_compile_options(name).optimization_level,
             "compiler_path": str(toolchain.compiler_path),
             "compile_lib": toolchain.compile_lib,
             "compile_flags": tuple(toolchain.compile_flags),
