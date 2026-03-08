@@ -199,11 +199,18 @@ class Map:
     process_class: type[ProcessBase]
     key_prefix: str = ""
     kwargs: dict[str, Any] = field(default_factory=dict)
+    kwargs_factory: Any = None  # Callable[[str], dict] | None
+
+    def _resolve_kwargs(self, variant: str) -> dict[str, Any]:
+        base = dict(self.kwargs)
+        if self.kwargs_factory is not None:
+            base.update(self.kwargs_factory(variant))
+        return base
 
     def _infer_prefix(self) -> str:
         if self.key_prefix:
             return self.key_prefix
-        probe = self.process_class(model_name=_PROBE_SENTINEL, **self.kwargs)  # type: ignore[call-arg]
+        probe = self.process_class(model_name=_PROBE_SENTINEL, **self._resolve_kwargs(_PROBE_SENTINEL))  # type: ignore[call-arg]
         for req in probe.requires:
             if req.endswith(f".{_PROBE_SENTINEL}"):
                 return req.rsplit(".", 1)[0]
@@ -224,7 +231,7 @@ class Map:
 
     def expand(self, ctx: RunContext) -> list[ProcessBase]:
         variants = self.discover_variants(ctx)
-        return [self.process_class(model_name=v, **self.kwargs) for v in variants]  # type: ignore[call-arg]
+        return [self.process_class(model_name=v, **self._resolve_kwargs(v)) for v in variants]  # type: ignore[call-arg]
 
 
 @dataclass(frozen=True)
@@ -474,7 +481,7 @@ class Pipeline:
 
         chains: dict[str, list[ProcessBase]] = {}
         for variant in variants:
-            chains[variant] = [m.process_class(model_name=variant, **m.kwargs) for m in maps]  # type: ignore[call-arg]
+            chains[variant] = [m.process_class(model_name=variant, **m._resolve_kwargs(variant)) for m in maps]  # type: ignore[call-arg]
 
         def run_chain(variant: str, procs: list[ProcessBase]) -> None:
             chain_temp = exec_ctx.temp_dir / variant

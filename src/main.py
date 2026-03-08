@@ -94,8 +94,12 @@ def main() -> None:
                 "各モデルの設定を確認・編集してから再実行してください。"
             ),
         ),
-        Map(CompileModel, kwargs={"recipe": recipe}),
-        Map(RunModel, kwargs={"recipe": recipe}),
+        Map(CompileModel, kwargs_factory=lambda name: {
+            **recipe.resolve_compile_options(name).model_dump(),
+        }),
+        Map(RunModel, kwargs_factory=lambda name: {
+            **recipe.resolve_run_options(name).model_dump(),
+        }),
         Map(FormatProfile),
         Reduce(AggregateProfile),
     ])

@@ -577,6 +577,25 @@ class TestMap:
         with pytest.raises(ValueError, match="Cannot infer key_prefix"):
             m._infer_prefix()
 
+    def test_kwargs_factory(self) -> None:
+        """kwargs_factory が variant ごとに異なる kwargs を返す."""
+        m = Map(
+            MappableProcess,
+            kwargs_factory=lambda v: {"extra": v.upper()},
+        )
+        assert m._resolve_kwargs("a") == {"extra": "A"}
+        assert m._resolve_kwargs("b") == {"extra": "B"}
+
+    def test_kwargs_and_kwargs_factory_merged(self) -> None:
+        """kwargs と kwargs_factory が両方指定された場合、マージされる."""
+        m = Map(
+            MappableProcess,
+            kwargs={"static": 1},
+            kwargs_factory=lambda v: {"dynamic": v},
+        )
+        result = m._resolve_kwargs("x")
+        assert result == {"static": 1, "dynamic": "x"}
+
 
 # ===========================================================================
 # Reduce

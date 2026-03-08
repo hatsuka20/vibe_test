@@ -19,7 +19,7 @@ from processes import (
     RunModel,
     RuntimeExec,
 )
-from recipe import CompileOptions, Recipe, RunOptions
+from recipe import Recipe
 
 
 # NOTE: CommandBuilder.build() の単体テストは省略。
@@ -130,7 +130,7 @@ class TestCompileModel:
     ) -> None:
         put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(model_name="resnet", recipe=Recipe())
+        proc = CompileModel(model_name="resnet")
         result = proc.run(run_ctx, exec_ctx)
 
         assert "compiled_model.resnet" in result
@@ -144,8 +144,7 @@ class TestCompileModel:
     ) -> None:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        recipe = Recipe(compile_options=CompileOptions(optimization_level=3))
-        proc = CompileModel(model_name="resnet", recipe=recipe)
+        proc = CompileModel(model_name="resnet", optimization_level=3)
         proc.run(run_ctx, exec_ctx)
 
         assert ModelCompile(
@@ -159,8 +158,7 @@ class TestCompileModel:
     ) -> None:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        recipe = Recipe(compile_options=CompileOptions(optimization_level=3))
-        proc = CompileModel(model_name="resnet", recipe=recipe)
+        proc = CompileModel(model_name="resnet", optimization_level=3)
         result = proc.run(run_ctx, exec_ctx)
 
         content = result["compiled_model.resnet"].path.read_text(encoding="utf-8")
@@ -168,7 +166,7 @@ class TestCompileModel:
         assert "optimization_level = 3" in content
 
     def test_requires_model(self) -> None:
-        proc = CompileModel(model_name="vgg", recipe=Recipe())
+        proc = CompileModel(model_name="vgg")
         assert proc.requires == ["model.vgg"]
 
     def test_uses_temp_dir_as_cwd(
@@ -178,7 +176,7 @@ class TestCompileModel:
         """CompileModel は env.run() に cwd=exec_ctx.temp_dir を渡す."""
         put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(model_name="resnet", recipe=Recipe())
+        proc = CompileModel(model_name="resnet")
         proc.run(run_ctx, exec_ctx)
 
         assert len(dry_env.history) == 1
@@ -193,7 +191,7 @@ class TestRunModel:
     ) -> None:
         put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        proc = RunModel(model_name="resnet", recipe=Recipe())
+        proc = RunModel(model_name="resnet")
         result = proc.run(run_ctx, exec_ctx)
 
         assert "profile.resnet" in result
@@ -214,8 +212,7 @@ class TestRunModel:
     ) -> None:
         compiled_path = put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        recipe = Recipe(run_options=RunOptions(num_iterations=500))
-        proc = RunModel(model_name="resnet", recipe=recipe)
+        proc = RunModel(model_name="resnet", num_iterations=500)
         proc.run(run_ctx, exec_ctx)
 
         assert RuntimeExec(
@@ -229,15 +226,14 @@ class TestRunModel:
     ) -> None:
         put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        recipe = Recipe(run_options=RunOptions(num_iterations=500))
-        proc = RunModel(model_name="resnet", recipe=recipe)
+        proc = RunModel(model_name="resnet", num_iterations=500)
         result = proc.run(run_ctx, exec_ctx)
 
         profile = json.loads(result["profile.resnet"].path.read_text(encoding="utf-8"))
         assert profile["iterations"] == 500
 
     def test_requires_compiled_model(self) -> None:
-        proc = RunModel(model_name="vgg", recipe=Recipe())
+        proc = RunModel(model_name="vgg")
         assert proc.requires == ["compiled_model.vgg"]
 
 

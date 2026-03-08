@@ -122,15 +122,13 @@ class DownloadModel(ProcessBase):
 @dataclass
 class CompileModel(ProcessBase):
     model_name: str = "default"
-    recipe: Recipe = field(default_factory=lambda: __import__("recipe").Recipe())
+    optimization_level: int = 2
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
         self.name = f"compile_{self.model_name}"
         self.requires = [f"model.{self.model_name}"]
         self.produces = [f"compiled_model.{self.model_name}"]
-        opts = self.recipe.resolve_compile_options(self.model_name)
-        self.optimization_level = opts.optimization_level
 
     def params(self) -> dict:
         return {"optimization_level": self.optimization_level}
@@ -179,15 +177,13 @@ namespace model {{
 @dataclass
 class RunModel(ProcessBase):
     model_name: str = "default"
-    recipe: Recipe = field(default_factory=lambda: __import__("recipe").Recipe())
+    num_iterations: int = 100
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
         self.name = f"run_{self.model_name}"
         self.requires = [f"compiled_model.{self.model_name}"]
         self.produces = [f"profile.{self.model_name}"]
-        opts = self.recipe.resolve_run_options(self.model_name)
-        self.num_iterations = opts.num_iterations
 
     def params(self) -> dict:
         return {"num_iterations": self.num_iterations}
