@@ -198,11 +198,12 @@ class Map:
     """variant ごとに process_class のインスタンスを生成する."""
     process_class: type[ProcessBase]
     key_prefix: str = ""
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
     def _infer_prefix(self) -> str:
         if self.key_prefix:
             return self.key_prefix
-        probe = self.process_class(model_name=_PROBE_SENTINEL)  # type: ignore[call-arg]
+        probe = self.process_class(model_name=_PROBE_SENTINEL, **self.kwargs)  # type: ignore[call-arg]
         for req in probe.requires:
             if req.endswith(f".{_PROBE_SENTINEL}"):
                 return req.rsplit(".", 1)[0]
@@ -223,7 +224,7 @@ class Map:
 
     def expand(self, ctx: RunContext) -> list[ProcessBase]:
         variants = self.discover_variants(ctx)
-        return [self.process_class(model_name=v) for v in variants]  # type: ignore[call-arg]
+        return [self.process_class(model_name=v, **self.kwargs) for v in variants]  # type: ignore[call-arg]
 
 
 @dataclass(frozen=True)
@@ -259,10 +260,29 @@ class Reduce:
         return self.process_class(model_names=variants)  # type: ignore[call-arg]
 
 
+class PipelineHalted(Exception):
+    """Gate の条件未達によりパイプラインが途中停止したことを示す."""
+
+    def __init__(self, message: str, ctx: RunContext) -> None:
+        super().__init__(message)
+        self.ctx = ctx
+
+
+@dataclass(frozen=True)
+class Gate:
+    """条件を満たすまでパイプラインを停止するゲート.
+
+    check が False を返すと PipelineHalted を送出する.
+    再実行時にキャッシュ済みステップをスキップし、Gate を再評価する.
+    """
+    check: Any  # Callable[[RunContext], bool]  (dataclass + callable の型制約回避)
+    message: str = "Pipeline halted: gate condition not met."
+
+
 # ---------------------------------------------------------------------------
 # Pipeline 内部の Phase 表現
 # ---------------------------------------------------------------------------
-Step = ProcessBase | Map | Reduce
+Step = ProcessBase | Map | Reduce | Gate
 
 
 @dataclass
@@ -280,7 +300,12 @@ class _ReducePhase:
     reduce: Reduce
 
 
-_Phase = _StaticPhase | _ChainPhase | _ReducePhase
+@dataclass
+class _GatePhase:
+    gate: Gate
+
+
+_Phase = _StaticPhase | _ChainPhase | _ReducePhase | _GatePhase
 
 
 def _build_phases(steps: Sequence[Step]) -> list[_Phase]:
@@ -298,6 +323,8 @@ def _build_phases(steps: Sequence[Step]) -> list[_Phase]:
                 phases.append(_ChainPhase(maps=[step]))
         elif isinstance(step, Reduce):
             phases.append(_ReducePhase(reduce=step))
+        elif isinstance(step, Gate):
+            phases.append(_GatePhase(gate=step))
     return phases
 
 
@@ -418,6 +445,9 @@ class Pipeline:
             elif isinstance(phase, _ReducePhase):
                 proc = phase.reduce.expand(ctx)
                 self._execute_static([proc], ctx, exec_ctx, force)
+            elif isinstance(phase, _GatePhase):
+                if not phase.gate.check(ctx):
+                    raise PipelineHalted(phase.gate.message, ctx)
 
         return ctx
 
@@ -444,7 +474,7 @@ class Pipeline:
 
         chains: dict[str, list[ProcessBase]] = {}
         for variant in variants:
-            chains[variant] = [m.process_class(model_name=variant) for m in maps]  # type: ignore[call-arg]
+            chains[variant] = [m.process_class(model_name=variant, **m.kwargs) for m in maps]  # type: ignore[call-arg]
 
         def run_chain(variant: str, procs: list[ProcessBase]) -> None:
             chain_temp = exec_ctx.temp_dir / variant

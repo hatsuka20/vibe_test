@@ -1,0 +1,19 @@
+{
+  release: "v50",
+  confirmed: false,
+
+  // 共通コンパイルオプション (個別設定がなければこれが使われる)
+  compile_options: {
+    optimization_level: 2,
+  },
+
+  // 共通ランタイムオプション
+  run_options: {
+    num_iterations: 100,
+  },
+
+  // モデル個別設定
+  // DownloadModel 実行後にモデル名が自動的に追加される
+  // 手動で各モデルの設定をオーバーライドし、confirmed を true にする
+  models: {},
+}

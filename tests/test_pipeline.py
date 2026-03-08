@@ -12,15 +12,18 @@ from typing import Any
 from pipeline import (
     Artifact,
     ExecContext,
+    Gate,
     Map,
     OptionalInput,
     Pipeline,
+    PipelineHalted,
     ProcessBase,
     ProducedArtifact,
     Reduce,
     RunContext,
     _build_phases,
     _ChainPhase,
+    _GatePhase,
     _ReducePhase,
     _SandboxedEnvironment,
     _StaticPhase,
@@ -858,3 +861,70 @@ class TestPipelineMapReduce:
 
         assert not (exec_ctx.temp_dir / "a").exists()
         assert not (exec_ctx.temp_dir / "b").exists()
+
+
+# ===========================================================================
+# Gate / PipelineHalted
+# ===========================================================================
+class TestGate:
+    def test_gate_passes(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """check が True → Gate を通過して後続が実行される."""
+        pipeline = Pipeline([
+            StubProcess(),
+            Gate(check=lambda ctx: True),
+            DependentProcess(),
+        ])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+        assert "derived" in ctx.artifacts
+
+    def test_gate_halts(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """check が False → PipelineHalted が送出される."""
+        pipeline = Pipeline([
+            StubProcess(),
+            Gate(check=lambda ctx: False, message="Recipe not ready"),
+            DependentProcess(),
+        ])
+        with pytest.raises(PipelineHalted, match="Recipe not ready") as exc_info:
+            pipeline.run(run_ctx, exec_ctx)
+
+        # Gate 前のプロセスは実行済み
+        assert "out" in exc_info.value.ctx.artifacts
+        # Gate 後のプロセスは未実行
+        assert "derived" not in exc_info.value.ctx.artifacts
+
+    def test_gate_resume_after_condition_met(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """1回目は停止、条件を満たして2回目は通過する."""
+        ready = {"value": False}
+
+        pipeline = Pipeline([
+            StubProcess(),
+            Gate(check=lambda ctx: ready["value"]),
+            DependentProcess(),
+        ])
+
+        # 1回目: Gate で停止
+        with pytest.raises(PipelineHalted):
+            pipeline.run(run_ctx, exec_ctx)
+        assert "out" in run_ctx.artifacts
+        assert "derived" not in run_ctx.artifacts
+
+        # 条件を満たす
+        ready["value"] = True
+
+        # 2回目: StubProcess はキャッシュヒット、Gate 通過、DependentProcess 実行
+        ctx = pipeline.run(run_ctx, exec_ctx)
+        assert "derived" in ctx.artifacts
+
+    def test_build_phases_with_gate(self) -> None:
+        """_build_phases が Gate を _GatePhase として扱う."""
+        phases = _build_phases([
+            StubProcess(name="a"),
+            Gate(check=lambda ctx: True),
+            Map(MappableProcess),
+        ])
+        assert len(phases) == 3
+        assert isinstance(phases[0], _StaticPhase)
+        assert isinstance(phases[1], _GatePhase)
+        assert isinstance(phases[2], _ChainPhase)

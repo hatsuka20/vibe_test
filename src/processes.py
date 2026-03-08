@@ -1,8 +1,11 @@
 """パイプラインを構成する Process / CommandBuilder の定義."""
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from environment import CommandBuilder
 from pipeline import (
@@ -11,6 +14,9 @@ from pipeline import (
     ProducedArtifact,
     RunContext,
 )
+
+if TYPE_CHECKING:
+    from recipe import Recipe
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +69,8 @@ class RuntimeExec(CommandBuilder):
 class DownloadModel(ProcessBase):
     release: str = "v50"
     url_base: str = "https://example.com/models"
+    recipe: Recipe | None = None
+    recipe_path: Path | None = None
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
@@ -89,6 +97,14 @@ class DownloadModel(ProcessBase):
             exec_ctx.logger.info("[A] ダウンロード完了 -> %s", model_path)
             result[f"model.{name}"] = ProducedArtifact(model_path, "onnx", "model.onnx.v1")
 
+        # レシピにモデル名を書き戻す
+        if self.recipe and self.recipe_path:
+            if self.recipe.populate_models(model_names):
+                self.recipe.save(self.recipe_path)
+                exec_ctx.logger.info(
+                    "[A] レシピにモデル名を反映: %s", self.recipe_path,
+                )
+
         return result
 
 
@@ -99,12 +115,16 @@ class DownloadModel(ProcessBase):
 class CompileModel(ProcessBase):
     model_name: str = "default"
     optimization_level: int = 2
+    recipe: Recipe | None = None
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
         self.name = f"compile_{self.model_name}"
         self.requires = [f"model.{self.model_name}"]
         self.produces = [f"compiled_model.{self.model_name}"]
+        if self.recipe:
+            opts = self.recipe.resolve_compile_options(self.model_name)
+            self.optimization_level = opts.optimization_level
 
     def params(self) -> dict:
         return {"optimization_level": self.optimization_level}
@@ -154,12 +174,16 @@ namespace model {{
 class RunModel(ProcessBase):
     model_name: str = "default"
     num_iterations: int = 100
+    recipe: Recipe | None = None
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
         self.name = f"run_{self.model_name}"
         self.requires = [f"compiled_model.{self.model_name}"]
         self.produces = [f"profile.{self.model_name}"]
+        if self.recipe:
+            opts = self.recipe.resolve_run_options(self.model_name)
+            self.num_iterations = opts.num_iterations
 
     def params(self) -> dict:
         return {"num_iterations": self.num_iterations}
