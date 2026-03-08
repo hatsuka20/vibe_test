@@ -84,7 +84,6 @@ def main() -> None:
 
     pipeline = Pipeline([
         DownloadModel(
-            release=recipe.release,
             recipe=recipe,
             recipe_path=recipe_path,
         ),

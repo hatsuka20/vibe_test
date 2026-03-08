@@ -22,6 +22,7 @@ class ModelConfig(BaseModel):
 
 class Recipe(BaseModel):
     release: str = "v50"
+    url_base: str = "https://example.com/models"
     compile_options: CompileOptions = Field(default_factory=CompileOptions)
     run_options: RunOptions = Field(default_factory=RunOptions)
     models: dict[str, ModelConfig] = Field(default_factory=dict)

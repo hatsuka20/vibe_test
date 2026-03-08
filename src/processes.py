@@ -67,9 +67,7 @@ class RuntimeExec(CommandBuilder):
 # ---------------------------------------------------------------------------
 @dataclass
 class DownloadModel(ProcessBase):
-    release: str = "v50"
-    url_base: str = "https://example.com/models"
-    recipe: Recipe | None = None
+    recipe: Recipe = field(default_factory=lambda: __import__("recipe").Recipe())
     recipe_path: Path | None = None
     version: str = "1.0.0"
 
@@ -78,7 +76,7 @@ class DownloadModel(ProcessBase):
         self.produces = []  # 動的 produces
 
     def params(self) -> dict:
-        return {"release": self.release, "url_base": self.url_base}
+        return {"release": self.recipe.release, "url_base": self.recipe.url_base}
 
     def _discover_models(self) -> list[str]:
         """モデル名を発見する (mock)."""
@@ -87,16 +85,17 @@ class DownloadModel(ProcessBase):
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         # confirmed=True → レシピのモデルリストを正として使用
         # confirmed=False → 実行時に発見して反映
-        if self.recipe and self.recipe.models_confirmed():
+        if self.recipe.models_confirmed():
             model_names = list(self.recipe.models.keys())
             exec_ctx.logger.info("[A] レシピのモデルリストを使用: %s", model_names)
         else:
             model_names = self._discover_models()
 
+        url_base = self.recipe.url_base
         result = {}
         for name in model_names:
             model_path = exec_ctx.out_dir / f"{name}.onnx"
-            cmd = CurlDownload(url=f"{self.url_base}/{name}.onnx", output=model_path)
+            cmd = CurlDownload(url=f"{url_base}/{name}.onnx", output=model_path)
             exec_ctx.logger.info("[A] モデルをダウンロード中: %s", cmd.url)
             exec_ctx.env.run(cmd)
 
@@ -107,7 +106,7 @@ class DownloadModel(ProcessBase):
             result[f"model.{name}"] = ProducedArtifact(model_path, "onnx", "model.onnx.v1")
 
         # confirmed でない場合のみレシピに書き戻す
-        if self.recipe and self.recipe_path and not self.recipe.models_confirmed():
+        if self.recipe_path and not self.recipe.models_confirmed():
             if self.recipe.populate_models(model_names):
                 self.recipe.save(self.recipe_path)
                 exec_ctx.logger.info(
@@ -123,17 +122,15 @@ class DownloadModel(ProcessBase):
 @dataclass
 class CompileModel(ProcessBase):
     model_name: str = "default"
-    optimization_level: int = 2
-    recipe: Recipe | None = None
+    recipe: Recipe = field(default_factory=lambda: __import__("recipe").Recipe())
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
         self.name = f"compile_{self.model_name}"
         self.requires = [f"model.{self.model_name}"]
         self.produces = [f"compiled_model.{self.model_name}"]
-        if self.recipe:
-            opts = self.recipe.resolve_compile_options(self.model_name)
-            self.optimization_level = opts.optimization_level
+        opts = self.recipe.resolve_compile_options(self.model_name)
+        self.optimization_level = opts.optimization_level
 
     def params(self) -> dict:
         return {"optimization_level": self.optimization_level}
@@ -182,17 +179,15 @@ namespace model {{
 @dataclass
 class RunModel(ProcessBase):
     model_name: str = "default"
-    num_iterations: int = 100
-    recipe: Recipe | None = None
+    recipe: Recipe = field(default_factory=lambda: __import__("recipe").Recipe())
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
         self.name = f"run_{self.model_name}"
         self.requires = [f"compiled_model.{self.model_name}"]
         self.produces = [f"profile.{self.model_name}"]
-        if self.recipe:
-            opts = self.recipe.resolve_run_options(self.model_name)
-            self.num_iterations = opts.num_iterations
+        opts = self.recipe.resolve_run_options(self.model_name)
+        self.num_iterations = opts.num_iterations
 
     def params(self) -> dict:
         return {"num_iterations": self.num_iterations}
