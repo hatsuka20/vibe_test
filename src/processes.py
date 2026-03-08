@@ -80,9 +80,18 @@ class DownloadModel(ProcessBase):
     def params(self) -> dict:
         return {"release": self.release, "url_base": self.url_base}
 
+    def _discover_models(self) -> list[str]:
+        """モデル名を発見する (mock)."""
+        return ["resnet", "vgg"]
+
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        # Mock: 実行時にモデルを発見
-        model_names = ["resnet", "vgg"]
+        # confirmed=True → レシピのモデルリストを正として使用
+        # confirmed=False → 実行時に発見して反映
+        if self.recipe and self.recipe.models_confirmed():
+            model_names = list(self.recipe.models.keys())
+            exec_ctx.logger.info("[A] レシピのモデルリストを使用: %s", model_names)
+        else:
+            model_names = self._discover_models()
 
         result = {}
         for name in model_names:
@@ -97,8 +106,8 @@ class DownloadModel(ProcessBase):
             exec_ctx.logger.info("[A] ダウンロード完了 -> %s", model_path)
             result[f"model.{name}"] = ProducedArtifact(model_path, "onnx", "model.onnx.v1")
 
-        # レシピにモデル名を書き戻す
-        if self.recipe and self.recipe_path:
+        # confirmed でない場合のみレシピに書き戻す
+        if self.recipe and self.recipe_path and not self.recipe.models_confirmed():
             if self.recipe.populate_models(model_names):
                 self.recipe.save(self.recipe_path)
                 exec_ctx.logger.info(
