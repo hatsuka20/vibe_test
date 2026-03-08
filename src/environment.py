@@ -90,13 +90,16 @@ class DryRunEnvironment(Environment):
     """コマンドを記録するだけで実行しない. テストや検証用."""
 
     def __init__(self) -> None:
-        self.history: list[CommandBuilder] = []
         self.records: list[DryRunRecord] = []
         self._lock = threading.Lock()
 
+    @property
+    def history(self) -> list[CommandBuilder]:
+        """後方互換: records の command 部分をリストで返す."""
+        return [r.command for r in self.records]
+
     def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
         with self._lock:
-            self.history.append(command)
             self.records.append(DryRunRecord(command=command, cwd=cwd))
         return CommandResult(
             command=command.build(),
