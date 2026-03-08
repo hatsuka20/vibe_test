@@ -519,11 +519,11 @@ class TestBuildPhases:
 class TestMap:
     def test_infer_prefix(self, run_ctx: RunContext) -> None:
         m = Map(MappableProcess)
-        assert m._infer_prefix() == "input"
+        assert m._get_prefix() == "input"
 
     def test_explicit_prefix(self) -> None:
         m = Map(MappableProcess, key_prefix="custom")
-        assert m._infer_prefix() == "custom"
+        assert m._get_prefix() == "custom"
 
     def test_discover_variants(self, run_ctx: RunContext, tmp_path: Path) -> None:
         for name in ["alpha", "beta"]:
@@ -575,7 +575,7 @@ class TestMap:
 
         m = Map(NoSentinel)
         with pytest.raises(ValueError, match="Cannot infer key_prefix"):
-            m._infer_prefix()
+            m._get_prefix()
 
     def test_kwargs_factory(self) -> None:
         """kwargs_factory が variant ごとに異なる kwargs を返す."""
@@ -603,7 +603,7 @@ class TestMap:
 class TestReduce:
     def test_explicit_prefix(self) -> None:
         r = Reduce(ReducibleProcess, key_prefix="custom")
-        assert r._infer_prefix() == "custom"
+        assert r._get_prefix() == "custom"
 
     def test_infer_prefix_fails_raises(self) -> None:
         @dataclass
@@ -621,7 +621,7 @@ class TestReduce:
 
         r = Reduce(NoSentinelReduce)
         with pytest.raises(ValueError, match="Cannot infer key_prefix"):
-            r._infer_prefix()
+            r._get_prefix()
 
     def test_expand(self, run_ctx: RunContext, tmp_path: Path) -> None:
         for name in ["a", "b"]:

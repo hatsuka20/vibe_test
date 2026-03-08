@@ -194,6 +194,28 @@ def compute_cache_key(process: ProcessBase, ctx: RunContext) -> str:
 _PROBE_SENTINEL = "__PROBE__"
 
 
+def _infer_prefix(process_class: type[ProcessBase], probe: ProcessBase) -> str:
+    """probe インスタンスの requires から key_prefix を推定する."""
+    for req in probe.requires:
+        if req.endswith(f".{_PROBE_SENTINEL}"):
+            return req.rsplit(".", 1)[0]
+    raise ValueError(
+        f"Cannot infer key_prefix for {process_class.__name__}. "
+        f"Provide key_prefix explicitly."
+    )
+
+
+def _discover_variants(prefix: str, ctx: RunContext) -> list[str]:
+    """ctx.artifacts から prefix に一致する variant 名を順序保持で返す."""
+    variants: list[str] = []
+    for key in ctx.artifacts:
+        if key.startswith(prefix + "."):
+            variant = key[len(prefix) + 1:]
+            if variant not in variants:
+                variants.append(variant)
+    return variants
+
+
 @dataclass(frozen=True)
 class Map:
     """variant ごとに process_class のインスタンスを生成する."""
@@ -208,27 +230,14 @@ class Map:
             base.update(self.kwargs_factory(variant))
         return base
 
-    def _infer_prefix(self) -> str:
+    def _get_prefix(self) -> str:
         if self.key_prefix:
             return self.key_prefix
         probe = self.process_class(model_name=_PROBE_SENTINEL, **self._resolve_kwargs(_PROBE_SENTINEL))  # type: ignore[call-arg]
-        for req in probe.requires:
-            if req.endswith(f".{_PROBE_SENTINEL}"):
-                return req.rsplit(".", 1)[0]
-        raise ValueError(
-            f"Cannot infer key_prefix for {self.process_class.__name__}. "
-            f"Provide key_prefix explicitly."
-        )
+        return _infer_prefix(self.process_class, probe)
 
     def discover_variants(self, ctx: RunContext) -> list[str]:
-        prefix = self._infer_prefix()
-        variants = []
-        for key in ctx.artifacts:
-            if key.startswith(prefix + "."):
-                variant = key[len(prefix) + 1:]
-                if variant not in variants:
-                    variants.append(variant)
-        return variants
+        return _discover_variants(self._get_prefix(), ctx)
 
     def expand(self, ctx: RunContext) -> list[ProcessBase]:
         variants = self.discover_variants(ctx)
@@ -241,27 +250,14 @@ class Reduce:
     process_class: type[ProcessBase]
     key_prefix: str = ""
 
-    def _infer_prefix(self) -> str:
+    def _get_prefix(self) -> str:
         if self.key_prefix:
             return self.key_prefix
         probe = self.process_class(model_names=[_PROBE_SENTINEL])  # type: ignore[call-arg]
-        for req in probe.requires:
-            if req.endswith(f".{_PROBE_SENTINEL}"):
-                return req.rsplit(".", 1)[0]
-        raise ValueError(
-            f"Cannot infer key_prefix for {self.process_class.__name__}. "
-            f"Provide key_prefix explicitly."
-        )
+        return _infer_prefix(self.process_class, probe)
 
     def discover_variants(self, ctx: RunContext) -> list[str]:
-        prefix = self._infer_prefix()
-        variants = []
-        for key in ctx.artifacts:
-            if key.startswith(prefix + "."):
-                variant = key[len(prefix) + 1:]
-                if variant not in variants:
-                    variants.append(variant)
-        return variants
+        return _discover_variants(self._get_prefix(), ctx)
 
     def expand(self, ctx: RunContext) -> ProcessBase:
         variants = self.discover_variants(ctx)
