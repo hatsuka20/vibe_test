@@ -21,12 +21,6 @@ from pipeline import (
     ProducedArtifact,
     Reduce,
     RunContext,
-    _build_phases,
-    _ChainPhase,
-    _GatePhase,
-    _ReducePhase,
-    _SandboxedEnvironment,
-    _StaticPhase,
     compute_cache_key,
     sha256_file,
 )
@@ -228,9 +222,11 @@ class TestPipelineInit:
         with pytest.raises(ValueError, match="Duplicate"):
             Pipeline([StubProcess(name="a"), StubProcess(name="a")])
 
-    def test_valid_processes(self) -> None:
+    def test_valid_processes_runs_without_error(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """有効なプロセスで構成された Pipeline は正常に実行できる."""
         pipeline = Pipeline([StubProcess(name="a"), StubProcess(name="b")])
-        assert len(pipeline._phases) == 1
+        ctx = pipeline.run(run_ctx, exec_ctx)
+        assert "out" in ctx.artifacts
 
 
 # ===========================================================================
@@ -452,65 +448,6 @@ class TestComputeCacheKeyOptional:
         key_after = compute_cache_key(proc, run_ctx)
 
         assert key_before == key_after
-
-
-# ===========================================================================
-# _SandboxedEnvironment
-# ===========================================================================
-class TestSandboxedEnvironment:
-    @dataclass(frozen=True)
-    class _Echo(CommandBuilder):
-        def build(self) -> list[str]:
-            return ["echo", "hi"]
-
-    def test_default_cwd_injected(self, tmp_path: Path) -> None:
-        """cwd 未指定時にデフォルト cwd が注入される."""
-        inner = DryRunEnvironment()
-        default_cwd = tmp_path / "work"
-        sandbox = _SandboxedEnvironment(inner, cwd=default_cwd)
-
-        sandbox.run(self._Echo())
-        assert len(inner.records) == 1
-        assert inner.records[0].cwd == default_cwd
-
-    def test_explicit_cwd_takes_precedence(self, tmp_path: Path) -> None:
-        """明示的に cwd を渡した場合はデフォルトより優先される."""
-        inner = DryRunEnvironment()
-        default_cwd = tmp_path / "default"
-        explicit_cwd = tmp_path / "explicit"
-        sandbox = _SandboxedEnvironment(inner, cwd=default_cwd)
-
-        sandbox.run(self._Echo(), cwd=explicit_cwd)
-        assert inner.records[0].cwd == explicit_cwd
-
-
-# ===========================================================================
-# _build_phases
-# ===========================================================================
-class TestBuildPhases:
-    def test_static_only(self) -> None:
-        phases = _build_phases([StubProcess(name="a"), StubProcess(name="b")])
-        assert len(phases) == 1
-        assert isinstance(phases[0], _StaticPhase)
-        assert len(phases[0].processes) == 2
-
-    def test_map_chain(self) -> None:
-        phases = _build_phases([Map(MappableProcess), Map(SecondMappable)])
-        assert len(phases) == 1
-        assert isinstance(phases[0], _ChainPhase)
-        assert len(phases[0].maps) == 2
-
-    def test_mixed_phases(self) -> None:
-        phases = _build_phases([
-            StubProcess(name="a"),
-            Map(MappableProcess),
-            Map(SecondMappable),
-            Reduce(ReducibleProcess),
-        ])
-        assert len(phases) == 3
-        assert isinstance(phases[0], _StaticPhase)
-        assert isinstance(phases[1], _ChainPhase)
-        assert isinstance(phases[2], _ReducePhase)
 
 
 # ===========================================================================
@@ -999,14 +936,24 @@ class TestGate:
         ctx = pipeline.run(run_ctx, exec_ctx)
         assert "derived" in ctx.artifacts
 
-    def test_build_phases_with_gate(self) -> None:
-        """_build_phases が Gate を _GatePhase として扱う."""
-        phases = _build_phases([
-            StubProcess(name="a"),
+    def test_gate_between_static_and_map(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """Static → Gate → Map の構成で正しく実行される."""
+        pipeline = Pipeline([
+            StubProcess(),
             Gate(check=lambda ctx: True),
             Map(MappableProcess),
         ])
-        assert len(phases) == 3
-        assert isinstance(phases[0], _StaticPhase)
-        assert isinstance(phases[1], _GatePhase)
-        assert isinstance(phases[2], _ChainPhase)
+
+        # Map が input.* を発見するためのアーティファクトを登録
+        p = tmp_path / "a.dat"
+        p.write_bytes(b"X")
+        run_ctx.artifacts["input.a"] = Artifact(
+            key="input.a", path=p, format="bin", schema="v1",
+            producer="test", cache_key="x", sha256="x",
+        )
+
+        ctx = pipeline.run(run_ctx, exec_ctx)
+        assert "out" in ctx.artifacts
+        assert "output.a" in ctx.artifacts
