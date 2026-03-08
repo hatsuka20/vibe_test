@@ -517,15 +517,8 @@ class TestBuildPhases:
 # Map
 # ===========================================================================
 class TestMap:
-    def test_infer_prefix(self, run_ctx: RunContext) -> None:
-        m = Map(MappableProcess)
-        assert m._get_prefix() == "input"
-
-    def test_explicit_prefix(self) -> None:
-        m = Map(MappableProcess, key_prefix="custom")
-        assert m._get_prefix() == "custom"
-
     def test_discover_variants(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """requires のプレフィックスを推定して variant を発見する."""
         for name in ["alpha", "beta"]:
             p = tmp_path / f"{name}.dat"
             p.write_bytes(b"X")
@@ -537,6 +530,19 @@ class TestMap:
         m = Map(MappableProcess)
         variants = m.discover_variants(run_ctx)
         assert set(variants) == {"alpha", "beta"}
+
+    def test_explicit_prefix_discovers_variants(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """key_prefix を明示すると、そのプレフィックスで variant を発見する."""
+        for name in ["a", "b"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"custom.{name}"] = Artifact(
+                key=f"custom.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        m = Map(MappableProcess, key_prefix="custom")
+        assert set(m.discover_variants(run_ctx)) == {"a", "b"}
 
     def test_expand(self, run_ctx: RunContext, tmp_path: Path) -> None:
         for name in ["a", "b"]:
@@ -557,7 +563,7 @@ class TestMap:
         m = Map(MappableProcess)
         assert m.discover_variants(run_ctx) == []
 
-    def test_infer_prefix_fails_raises(self) -> None:
+    def test_expand_fails_when_prefix_not_inferrable(self, run_ctx: RunContext) -> None:
         """probe の requires にセンチネルが含まれない場合は ValueError."""
 
         @dataclass
@@ -575,37 +581,94 @@ class TestMap:
 
         m = Map(NoSentinel)
         with pytest.raises(ValueError, match="Cannot infer key_prefix"):
-            m._get_prefix()
+            m.expand(run_ctx)
 
-    def test_kwargs_factory(self) -> None:
-        """kwargs_factory が variant ごとに異なる kwargs を返す."""
-        m = Map(
-            MappableProcess,
-            kwargs_factory=lambda v: {"extra": v.upper()},
+    def test_kwargs_factory_applied_per_variant(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """kwargs_factory が variant ごとに異なるパラメータで Process を生成する."""
+
+        @dataclass
+        class ParamProcess(ProcessBase):
+            model_name: str = "default"
+            extra: str = ""
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"param_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"output.{self.model_name}"]
+
+            def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+                return {}
+
+        for name in ["a", "b"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"input.{name}"] = Artifact(
+                key=f"input.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        m = Map(ParamProcess, kwargs_factory=lambda v: {"extra": v.upper()})
+        procs = m.expand(run_ctx)
+
+        by_name = {p.model_name: p for p in procs}
+        assert by_name["a"].extra == "A"
+        assert by_name["b"].extra == "B"
+
+    def test_kwargs_and_kwargs_factory_merged_on_expand(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """kwargs と kwargs_factory が両方指定された場合、マージされて Process に渡る."""
+
+        @dataclass
+        class MultiParamProcess(ProcessBase):
+            model_name: str = "default"
+            static: int = 0
+            dynamic: str = ""
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"mp_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"output.{self.model_name}"]
+
+            def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+                return {}
+
+        p = tmp_path / "x.dat"
+        p.write_bytes(b"X")
+        run_ctx.artifacts["input.x"] = Artifact(
+            key="input.x", path=p, format="bin", schema="v1",
+            producer="test", cache_key="x", sha256="x",
         )
-        assert m._resolve_kwargs("a") == {"extra": "A"}
-        assert m._resolve_kwargs("b") == {"extra": "B"}
 
-    def test_kwargs_and_kwargs_factory_merged(self) -> None:
-        """kwargs と kwargs_factory が両方指定された場合、マージされる."""
         m = Map(
-            MappableProcess,
+            MultiParamProcess,
             kwargs={"static": 1},
             kwargs_factory=lambda v: {"dynamic": v},
         )
-        result = m._resolve_kwargs("x")
-        assert result == {"static": 1, "dynamic": "x"}
+        procs = m.expand(run_ctx)
+        assert len(procs) == 1
+        assert procs[0].static == 1
+        assert procs[0].dynamic == "x"
 
 
 # ===========================================================================
 # Reduce
 # ===========================================================================
 class TestReduce:
-    def test_explicit_prefix(self) -> None:
-        r = Reduce(ReducibleProcess, key_prefix="custom")
-        assert r._get_prefix() == "custom"
+    def test_explicit_prefix_discovers_variants(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """key_prefix を明示すると、そのプレフィックスで variant を発見する."""
+        for name in ["a", "b"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"custom.{name}"] = Artifact(
+                key=f"custom.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
 
-    def test_infer_prefix_fails_raises(self) -> None:
+        r = Reduce(ReducibleProcess, key_prefix="custom")
+        assert set(r.discover_variants(run_ctx)) == {"a", "b"}
+
+    def test_expand_fails_when_prefix_not_inferrable(self, run_ctx: RunContext) -> None:
         @dataclass
         class NoSentinelReduce(ProcessBase):
             model_names: list[str] = field(default_factory=list)
@@ -621,7 +684,7 @@ class TestReduce:
 
         r = Reduce(NoSentinelReduce)
         with pytest.raises(ValueError, match="Cannot infer key_prefix"):
-            r._get_prefix()
+            r.expand(run_ctx)
 
     def test_expand(self, run_ctx: RunContext, tmp_path: Path) -> None:
         for name in ["a", "b"]:
