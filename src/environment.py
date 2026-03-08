@@ -79,16 +79,25 @@ class RemoteEnvironment(Environment):
         )
 
 
+@dataclass(frozen=True)
+class DryRunRecord:
+    """DryRunEnvironment が記録する 1 回分の呼び出し."""
+    command: CommandBuilder
+    cwd: Path | None
+
+
 class DryRunEnvironment(Environment):
     """コマンドを記録するだけで実行しない. テストや検証用."""
 
     def __init__(self) -> None:
         self.history: list[CommandBuilder] = []
+        self.records: list[DryRunRecord] = []
         self._lock = threading.Lock()
 
     def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
         with self._lock:
             self.history.append(command)
+            self.records.append(DryRunRecord(command=command, cwd=cwd))
         return CommandResult(
             command=command.build(),
             returncode=0,

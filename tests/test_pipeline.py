@@ -455,43 +455,30 @@ class TestComputeCacheKeyOptional:
 # _SandboxedEnvironment
 # ===========================================================================
 class TestSandboxedEnvironment:
-    @pytest.fixture()
-    def _spy_env(self, tmp_path: Path):
-        """inner env + cwd 記録用 spy を返す fixture."""
-        received_cwds: list[Path | None] = []
-        inner = DryRunEnvironment()
-        original_run = inner.run
-
-        def spy(command, *, cwd=None):
-            received_cwds.append(cwd)
-            return original_run(command, cwd=cwd)
-
-        inner.run = spy  # type: ignore[assignment]
-        return inner, received_cwds
-
     @dataclass(frozen=True)
     class _Echo(CommandBuilder):
         def build(self) -> list[str]:
             return ["echo", "hi"]
 
-    def test_default_cwd_injected(self, tmp_path: Path, _spy_env) -> None:
+    def test_default_cwd_injected(self, tmp_path: Path) -> None:
         """cwd 未指定時にデフォルト cwd が注入される."""
-        inner, received_cwds = _spy_env
+        inner = DryRunEnvironment()
         default_cwd = tmp_path / "work"
         sandbox = _SandboxedEnvironment(inner, cwd=default_cwd)
 
         sandbox.run(self._Echo())
-        assert received_cwds == [default_cwd]
+        assert len(inner.records) == 1
+        assert inner.records[0].cwd == default_cwd
 
-    def test_explicit_cwd_takes_precedence(self, tmp_path: Path, _spy_env) -> None:
+    def test_explicit_cwd_takes_precedence(self, tmp_path: Path) -> None:
         """明示的に cwd を渡した場合はデフォルトより優先される."""
-        inner, received_cwds = _spy_env
+        inner = DryRunEnvironment()
         default_cwd = tmp_path / "default"
         explicit_cwd = tmp_path / "explicit"
         sandbox = _SandboxedEnvironment(inner, cwd=default_cwd)
 
         sandbox.run(self._Echo(), cwd=explicit_cwd)
-        assert received_cwds == [explicit_cwd]
+        assert inner.records[0].cwd == explicit_cwd
 
 
 # ===========================================================================
@@ -719,14 +706,7 @@ class TestPipelineMapReduce:
         self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
     ) -> None:
         """Map 内の env.run() にデフォルト cwd が注入されることを確認."""
-        observed_cwds: list[Path | None] = []
-        original_env_run = exec_ctx.env.run
-
-        def spy_run(command, *, cwd=None):
-            observed_cwds.append(cwd)
-            return original_env_run(command, cwd=cwd)
-
-        exec_ctx.env.run = spy_run  # type: ignore[assignment]
+        env: DryRunEnvironment = exec_ctx.env  # type: ignore[assignment]
 
         @dataclass
         class CmdRunner(ProcessBase):
@@ -739,8 +719,6 @@ class TestPipelineMapReduce:
                 self.produces = [f"cmd_out.{self.model_name}"]
 
             def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
-                from environment import CommandBuilder
-
                 @dataclass(frozen=True)
                 class Noop(CommandBuilder):
                     def build(self) -> list[str]:
@@ -755,10 +733,9 @@ class TestPipelineMapReduce:
         pipeline = Pipeline([Map(CmdRunner)])
         pipeline.run(run_ctx, exec_ctx)
 
-        # _SandboxedEnvironment が inner.run() に cwd を渡す
-        assert len(observed_cwds) == 1
-        assert observed_cwds[0] is not None
-        assert observed_cwds[0] == exec_ctx.temp_dir / "a"
+        # DryRunEnvironment.records で cwd を直接確認
+        assert len(env.records) == 1
+        assert env.records[0].cwd == exec_ctx.temp_dir / "a"
 
     def test_artifacts_relocated_to_out_dir(
         self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
