@@ -16,7 +16,7 @@ class TestRecipeLoad:
         assert recipe.release == "v99"
         assert recipe.compile_options.optimization_level == 2
         assert recipe.run_options.num_iterations == 100
-        assert recipe.models == {}
+        assert recipe.models == []
 
     def test_load_full(self, tmp_path: Path) -> None:
         path = tmp_path / "recipe.json5"
@@ -24,19 +24,17 @@ class TestRecipeLoad:
             "release": "v42",
             "compile_options": {"optimization_level": 3},
             "run_options": {"num_iterations": 200},
-            "models": {
-                "resnet": {
-                    "compile_options": {"optimization_level": 1},
-                },
-                "vgg": {},
-            },
+            "models": [
+                {"name": "resnet", "compile_options": {"optimization_level": 1}},
+                {"name": "vgg"},
+            ],
         }))
         recipe = Recipe.load(path)
         assert recipe.release == "v42"
         assert recipe.compile_options.optimization_level == 3
         assert recipe.run_options.num_iterations == 200
-        assert "resnet" in recipe.models
-        assert "vgg" in recipe.models
+        assert recipe.get_model("resnet") is not None
+        assert recipe.get_model("vgg") is not None
 
 
 class TestRecipeSave:
@@ -45,14 +43,14 @@ class TestRecipeSave:
         original = Recipe(
             release="v10",
             compile_options=CompileOptions(optimization_level=3),
-            models={"resnet": ModelConfig()},
+            models=[ModelConfig(name="resnet")],
         )
         original.save(path)
 
         loaded = Recipe.load(path)
         assert loaded.release == "v10"
         assert loaded.compile_options.optimization_level == 3
-        assert "resnet" in loaded.models
+        assert loaded.get_model("resnet") is not None
 
 
 class TestResolveOptions:
@@ -66,11 +64,12 @@ class TestResolveOptions:
         """個別設定あり → 共通設定をオーバーライド."""
         recipe = Recipe(
             compile_options=CompileOptions(optimization_level=2),
-            models={
-                "resnet": ModelConfig(
+            models=[
+                ModelConfig(
+                    name="resnet",
                     compile_options=CompileOptions(optimization_level=0),
                 ),
-            },
+            ],
         )
         opts = recipe.resolve_compile_options("resnet")
         assert opts.optimization_level == 0
@@ -89,11 +88,12 @@ class TestResolveOptions:
     def test_run_override(self) -> None:
         recipe = Recipe(
             run_options=RunOptions(num_iterations=100),
-            models={
-                "vgg": ModelConfig(
+            models=[
+                ModelConfig(
+                    name="vgg",
                     run_options=RunOptions(num_iterations=1000),
                 ),
-            },
+            ],
         )
         opts = recipe.resolve_run_options("vgg")
         assert opts.num_iterations == 1000
@@ -104,7 +104,7 @@ class TestPopulateModels:
         recipe = Recipe()
         changed = recipe.populate_models(["resnet", "vgg"])
         assert changed is True
-        assert set(recipe.models.keys()) == {"resnet", "vgg"}
+        assert set(recipe.model_names()) == {"resnet", "vgg"}
 
     def test_resets_confirmed_on_change(self) -> None:
         """新しいモデルが追加されたら confirmed が False にリセットされる."""
@@ -114,7 +114,7 @@ class TestPopulateModels:
 
     def test_no_change_if_already_present(self) -> None:
         recipe = Recipe(
-            models={"resnet": ModelConfig(), "vgg": ModelConfig()},
+            models=[ModelConfig(name="resnet"), ModelConfig(name="vgg")],
             confirmed=True,
         )
         changed = recipe.populate_models(["resnet", "vgg"])
@@ -124,15 +124,16 @@ class TestPopulateModels:
     def test_preserves_existing_config(self) -> None:
         """既存の個別設定が上書きされないことを確認."""
         recipe = Recipe(
-            models={
-                "resnet": ModelConfig(
+            models=[
+                ModelConfig(
+                    name="resnet",
                     compile_options=CompileOptions(optimization_level=0),
                 ),
-            },
+            ],
         )
         recipe.populate_models(["resnet", "vgg"])
-        assert recipe.models["resnet"].compile_options.optimization_level == 0
-        assert recipe.models["vgg"].compile_options is None
+        assert recipe.get_model("resnet").compile_options.optimization_level == 0
+        assert recipe.get_model("vgg").compile_options is None
 
 
 class TestModelsConfirmed:
@@ -140,10 +141,32 @@ class TestModelsConfirmed:
         assert Recipe().models_confirmed() is False
 
     def test_confirmed_when_flag_set(self) -> None:
-        recipe = Recipe(confirmed=True, models={"resnet": ModelConfig()})
+        recipe = Recipe(confirmed=True, models=[ModelConfig(name="resnet")])
         assert recipe.models_confirmed() is True
 
     def test_not_confirmed_even_with_models(self) -> None:
         """models があっても confirmed=False なら未確認."""
-        recipe = Recipe(models={"resnet": ModelConfig()})
+        recipe = Recipe(models=[ModelConfig(name="resnet")])
         assert recipe.models_confirmed() is False
+
+
+class TestGetModel:
+    def test_found(self) -> None:
+        recipe = Recipe(models=[ModelConfig(name="resnet")])
+        assert recipe.get_model("resnet").name == "resnet"
+
+    def test_not_found(self) -> None:
+        recipe = Recipe()
+        assert recipe.get_model("unknown") is None
+
+
+class TestModelNames:
+    def test_empty(self) -> None:
+        assert Recipe().model_names() == []
+
+    def test_returns_names_in_order(self) -> None:
+        recipe = Recipe(models=[
+            ModelConfig(name="vgg"),
+            ModelConfig(name="resnet"),
+        ])
+        assert recipe.model_names() == ["vgg", "resnet"]

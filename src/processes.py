@@ -83,7 +83,7 @@ class DownloadModel(ProcessBase):
         # confirmed=True → レシピのモデルリストを正として使用
         # confirmed=False → 実行時に発見して反映
         if self.recipe.models_confirmed():
-            model_names = list(self.recipe.models.keys())
+            model_names = self.recipe.model_names()
             exec_ctx.logger.info("[A] レシピのモデルリストを使用: %s", model_names)
         else:
             model_names = self._discover_models()

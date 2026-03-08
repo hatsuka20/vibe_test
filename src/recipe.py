@@ -16,6 +16,7 @@ class RunOptions(BaseModel):
 
 class ModelConfig(BaseModel):
     """モデル個別設定. 未指定のフィールドは共通設定で埋められる."""
+    name: str
     compile_options: CompileOptions | None = None
     run_options: RunOptions | None = None
 
@@ -25,7 +26,7 @@ class Recipe(BaseModel):
     url_base: str = "https://example.com/models"
     compile_options: CompileOptions = Field(default_factory=CompileOptions)
     run_options: RunOptions = Field(default_factory=RunOptions)
-    models: dict[str, ModelConfig] = Field(default_factory=dict)
+    models: list[ModelConfig] = Field(default_factory=list)
     confirmed: bool = False
 
     @classmethod
@@ -39,10 +40,21 @@ class Recipe(BaseModel):
             encoding="utf-8",
         )
 
+    def get_model(self, model_name: str) -> ModelConfig | None:
+        """名前でモデル設定を検索する."""
+        for m in self.models:
+            if m.name == model_name:
+                return m
+        return None
+
+    def model_names(self) -> list[str]:
+        """全モデル名をリストで返す."""
+        return [m.name for m in self.models]
+
     def resolve_compile_options(self, model_name: str) -> CompileOptions:
         """共通設定に個別設定をオーバーライドして返す."""
         base = self.compile_options.model_dump()
-        model_cfg = self.models.get(model_name)
+        model_cfg = self.get_model(model_name)
         if model_cfg and model_cfg.compile_options:
             base.update(
                 {k: v for k, v in model_cfg.compile_options.model_dump().items()
@@ -53,7 +65,7 @@ class Recipe(BaseModel):
     def resolve_run_options(self, model_name: str) -> RunOptions:
         """共通設定に個別設定をオーバーライドして返す."""
         base = self.run_options.model_dump()
-        model_cfg = self.models.get(model_name)
+        model_cfg = self.get_model(model_name)
         if model_cfg and model_cfg.run_options:
             base.update(
                 {k: v for k, v in model_cfg.run_options.model_dump().items()
@@ -66,10 +78,11 @@ class Recipe(BaseModel):
 
         新しいモデルが追加された場合 confirmed を False にリセットし True を返す.
         """
+        existing = {m.name for m in self.models}
         changed = False
         for name in model_names:
-            if name not in self.models:
-                self.models[name] = ModelConfig()
+            if name not in existing:
+                self.models.append(ModelConfig(name=name))
                 changed = True
         if changed:
             self.confirmed = False

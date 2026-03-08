@@ -15,5 +15,5 @@
   // モデル個別設定
   // DownloadModel 実行後にモデル名が自動的に追加される
   // 手動で各モデルの設定をオーバーライドし、confirmed を true にする
-  models: {},
+  models: [],
 }
