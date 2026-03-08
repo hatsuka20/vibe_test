@@ -102,7 +102,7 @@ def main() -> None:
             "chip": toolchain.chip,
         }),
         Map(CompileModel, kwargs_factory=lambda name: {
-            "optimization_level": recipe.resolve_compile_options(name).optimization_level,
+            "compile_options": recipe.resolve_compile_options(name),
             "compiler_path": str(toolchain.compiler_path),
             "compile_lib": toolchain.compile_lib,
             "compile_flags": tuple(toolchain.compile_flags),

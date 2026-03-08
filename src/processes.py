@@ -203,7 +203,7 @@ class GenerateConfig(ProcessBase):
 @dataclass
 class CompileModel(ProcessBase):
     model_name: str = "default"
-    optimization_level: int = 2
+    compile_options: CompileOptions = field(default_factory=CompileOptions)
     compiler_path: str = "model-compiler"
     compile_lib: str = ""
     compile_flags: tuple[str, ...] = ()
@@ -216,7 +216,7 @@ class CompileModel(ProcessBase):
 
     def params(self) -> dict:
         return {
-            "optimization_level": self.optimization_level,
+            "optimization_level": self.compile_options.optimization_level,
             "compiler_path": self.compiler_path,
             "compile_lib": self.compile_lib,
             "compile_flags": list(self.compile_flags),
@@ -230,7 +230,7 @@ class CompileModel(ProcessBase):
         cmd = ModelCompile(
             model_path=model_art.path,
             output=cpp_path,
-            optimization_level=self.optimization_level,
+            optimization_level=self.compile_options.optimization_level,
             config_path=config_art.path,
             compiler_path=self.compiler_path,
             compile_lib=self.compile_lib,
@@ -238,7 +238,7 @@ class CompileModel(ProcessBase):
         )
         exec_ctx.logger.info(
             "[B2] モデルをコンパイル中: %s (O%d, config=%s)",
-            model_art.path, self.optimization_level, config_art.path,
+            model_art.path, self.compile_options.optimization_level, config_art.path,
         )
         exec_ctx.env.run(cmd, cwd=exec_ctx.temp_dir)
 
@@ -246,7 +246,7 @@ class CompileModel(ProcessBase):
         cpp_content = f"""\
 // Auto-generated from {model_art.path}
 // config = {config_art.path}
-// optimization_level = {self.optimization_level}
+// optimization_level = {self.compile_options.optimization_level}
 #include <cstdint>
 
 namespace model {{

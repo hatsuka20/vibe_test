@@ -225,7 +225,7 @@ class TestCompileModel:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
         config_path = exec_ctx.out_dir / "resnet_config.ini"
 
-        proc = CompileModel(model_name="resnet", optimization_level=3)
+        proc = CompileModel(model_name="resnet", compile_options=CompileOptions(optimization_level=3))
         proc.run(run_ctx, exec_ctx)
 
         assert ModelCompile(
@@ -240,7 +240,7 @@ class TestCompileModel:
     ) -> None:
         model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(model_name="resnet", optimization_level=3)
+        proc = CompileModel(model_name="resnet", compile_options=CompileOptions(optimization_level=3))
         result = proc.run(run_ctx, exec_ctx)
 
         content = result["compiled_model.resnet"].path.read_text(encoding="utf-8")
@@ -273,7 +273,7 @@ class TestCompileModel:
 
         proc = CompileModel(
             model_name="resnet",
-            optimization_level=2,
+            compile_options=CompileOptions(optimization_level=2),
             compile_lib="libChipY.so",
             compile_flags=("--target=chipy", "--fp16"),
         )
