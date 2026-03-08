@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import shutil
 import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from environment import Environment, LocalEnvironment
+from environment import CommandBuilder, CommandResult, Environment, LocalEnvironment
 
 
 def sha256_bytes(b: bytes) -> str:
@@ -104,6 +105,17 @@ class RunContext:
                 arts[k] = Artifact(**v)
             ctx.artifacts = arts
         return ctx
+
+
+class _SandboxedEnvironment(Environment):
+    """全コマンドにデフォルト cwd を注入する Environment ラッパー."""
+
+    def __init__(self, inner: Environment, cwd: Path) -> None:
+        self._inner = inner
+        self._cwd = cwd
+
+    def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
+        return self._inner.run(command, cwd=cwd or self._cwd)
 
 
 @dataclass
@@ -318,8 +330,13 @@ def _execute_one(
     exec_ctx: ExecContext,
     *,
     force: set[str],
+    relocate_to: Path | None = None,
 ) -> None:
-    """単一プロセスの実行 (キャッシュ判定 → run → 検証 → 登録)."""
+    """単一プロセスの実行 (キャッシュ判定 → run → 検証 → 登録).
+
+    relocate_to が指定された場合、生成ファイルをそのディレクトリに移動し
+    Artifact のパスを移動先で登録する.
+    """
     for req in proc.requires:
         ctx.get(req)
 
@@ -349,11 +366,16 @@ def _execute_one(
             raise RuntimeError(" ".join(parts))
 
     for key, part in produced.items():
-        sha = sha256_file(part.path)
+        final_path = part.path
+        if relocate_to is not None:
+            final_path = relocate_to / part.path.name
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(part.path), str(final_path))
+        sha = sha256_file(final_path)
         ctx.put(
             Artifact(
                 key=key,
-                path=part.path,
+                path=final_path,
                 format=part.format,
                 schema=part.schema,
                 producer=proc.name,
@@ -428,13 +450,16 @@ class Pipeline:
             chain_temp = exec_ctx.temp_dir / variant
             chain_temp.mkdir(parents=True, exist_ok=True)
             chain_exec_ctx = ExecContext(
-                out_dir=exec_ctx.out_dir,
+                out_dir=chain_temp,
                 temp_dir=chain_temp,
                 logger=exec_ctx.logger,
-                env=exec_ctx.env,
+                env=_SandboxedEnvironment(exec_ctx.env, cwd=chain_temp),
             )
             for proc in procs:
-                _execute_one(proc, ctx, chain_exec_ctx, force=force)
+                _execute_one(
+                    proc, ctx, chain_exec_ctx,
+                    force=force, relocate_to=exec_ctx.out_dir,
+                )
 
         with ThreadPoolExecutor() as pool:
             futures = {
@@ -443,3 +468,9 @@ class Pipeline:
             }
             for variant, future in futures.items():
                 future.result()
+
+        # 一時ディレクトリを削除
+        for variant in variants:
+            chain_temp = exec_ctx.temp_dir / variant
+            if chain_temp.exists():
+                shutil.rmtree(chain_temp)

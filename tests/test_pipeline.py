@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from environment import DryRunEnvironment
+from environment import CommandBuilder, DryRunEnvironment
 from typing import Any
 
 from pipeline import (
@@ -22,6 +22,7 @@ from pipeline import (
     _build_phases,
     _ChainPhase,
     _ReducePhase,
+    _SandboxedEnvironment,
     _StaticPhase,
     compute_cache_key,
     sha256_file,
@@ -451,6 +452,49 @@ class TestComputeCacheKeyOptional:
 
 
 # ===========================================================================
+# _SandboxedEnvironment
+# ===========================================================================
+class TestSandboxedEnvironment:
+    @pytest.fixture()
+    def _spy_env(self, tmp_path: Path):
+        """inner env + cwd 記録用 spy を返す fixture."""
+        received_cwds: list[Path | None] = []
+        inner = DryRunEnvironment()
+        original_run = inner.run
+
+        def spy(command, *, cwd=None):
+            received_cwds.append(cwd)
+            return original_run(command, cwd=cwd)
+
+        inner.run = spy  # type: ignore[assignment]
+        return inner, received_cwds
+
+    @dataclass(frozen=True)
+    class _Echo(CommandBuilder):
+        def build(self) -> list[str]:
+            return ["echo", "hi"]
+
+    def test_default_cwd_injected(self, tmp_path: Path, _spy_env) -> None:
+        """cwd 未指定時にデフォルト cwd が注入される."""
+        inner, received_cwds = _spy_env
+        default_cwd = tmp_path / "work"
+        sandbox = _SandboxedEnvironment(inner, cwd=default_cwd)
+
+        sandbox.run(self._Echo())
+        assert received_cwds == [default_cwd]
+
+    def test_explicit_cwd_takes_precedence(self, tmp_path: Path, _spy_env) -> None:
+        """明示的に cwd を渡した場合はデフォルトより優先される."""
+        inner, received_cwds = _spy_env
+        default_cwd = tmp_path / "default"
+        explicit_cwd = tmp_path / "explicit"
+        sandbox = _SandboxedEnvironment(inner, cwd=default_cwd)
+
+        sandbox.run(self._Echo(), cwd=explicit_cwd)
+        assert received_cwds == [explicit_cwd]
+
+
+# ===========================================================================
 # _build_phases
 # ===========================================================================
 class TestBuildPhases:
@@ -670,3 +714,75 @@ class TestPipelineMapReduce:
 
         assert len(observed_temp_dirs) == 2
         assert observed_temp_dirs[0] != observed_temp_dirs[1]
+
+    def test_sandboxed_env_injects_cwd(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """Map 内の env.run() にデフォルト cwd が注入されることを確認."""
+        observed_cwds: list[Path | None] = []
+        original_env_run = exec_ctx.env.run
+
+        def spy_run(command, *, cwd=None):
+            observed_cwds.append(cwd)
+            return original_env_run(command, cwd=cwd)
+
+        exec_ctx.env.run = spy_run  # type: ignore[assignment]
+
+        @dataclass
+        class CmdRunner(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"cmd_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"cmd_out.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                from environment import CommandBuilder
+
+                @dataclass(frozen=True)
+                class Noop(CommandBuilder):
+                    def build(self) -> list[str]:
+                        return ["echo", "test"]
+
+                ectx.env.run(Noop())
+                path = ectx.out_dir / f"cmd_{self.model_name}.dat"
+                path.write_bytes(b"C")
+                return {f"cmd_out.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a"])
+        pipeline = Pipeline([Map(CmdRunner)])
+        pipeline.run(run_ctx, exec_ctx)
+
+        # _SandboxedEnvironment が inner.run() に cwd を渡す
+        assert len(observed_cwds) == 1
+        assert observed_cwds[0] is not None
+        assert observed_cwds[0] == exec_ctx.temp_dir / "a"
+
+    def test_artifacts_relocated_to_out_dir(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """Map で生成されたアーティファクトが out_dir に移動されることを確認."""
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+
+        pipeline = Pipeline([Map(MappableProcess)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        for name in ["a", "b"]:
+            art = ctx.artifacts[f"output.{name}"]
+            assert art.path.parent == exec_ctx.out_dir
+            assert art.path.exists()
+
+    def test_temp_dirs_cleaned_up(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """Map 完了後に一時ディレクトリが削除されることを確認."""
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+
+        pipeline = Pipeline([Map(MappableProcess)])
+        pipeline.run(run_ctx, exec_ctx)
+
+        # variant ごとの一時ディレクトリが消えている
+        assert not (exec_ctx.temp_dir / "a").exists()
+        assert not (exec_ctx.temp_dir / "b").exists()
