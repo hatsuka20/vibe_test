@@ -14,6 +14,11 @@ class RunOptions(BaseModel):
     num_iterations: int = 100
 
 
+class TargetConfig(BaseModel):
+    """ターゲットチップの指定. ユーザはチップ名のみ指定する."""
+    chip: str = "chipX"
+
+
 class ModelConfig(BaseModel):
     """モデル個別設定. 未指定のフィールドは共通設定で埋められる."""
     name: str
@@ -24,6 +29,7 @@ class ModelConfig(BaseModel):
 class Recipe(BaseModel):
     release: str = "v50"
     url_base: str = "https://example.com/models"
+    target: TargetConfig = Field(default_factory=TargetConfig)
     compile_options: CompileOptions = Field(default_factory=CompileOptions)
     run_options: RunOptions = Field(default_factory=RunOptions)
     models: list[ModelConfig] = Field(default_factory=list)

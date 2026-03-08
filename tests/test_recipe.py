@@ -5,7 +5,7 @@ from pathlib import Path
 import json5
 import pytest
 
-from recipe import CompileOptions, ModelConfig, Recipe, RunOptions
+from recipe import CompileOptions, ModelConfig, Recipe, RunOptions, TargetConfig
 
 
 class TestRecipeLoad:
@@ -14,6 +14,7 @@ class TestRecipeLoad:
         path.write_text('{ release: "v99" }')
         recipe = Recipe.load(path)
         assert recipe.release == "v99"
+        assert recipe.target.chip == "chipX"  # デフォルト
         assert recipe.compile_options.optimization_level == 2
         assert recipe.run_options.num_iterations == 100
         assert recipe.models == []
@@ -22,6 +23,7 @@ class TestRecipeLoad:
         path = tmp_path / "recipe.json5"
         path.write_text(json5.dumps({
             "release": "v42",
+            "target": {"chip": "chipY"},
             "compile_options": {"optimization_level": 3},
             "run_options": {"num_iterations": 200},
             "models": [
@@ -31,6 +33,7 @@ class TestRecipeLoad:
         }))
         recipe = Recipe.load(path)
         assert recipe.release == "v42"
+        assert recipe.target.chip == "chipY"
         assert recipe.compile_options.optimization_level == 3
         assert recipe.run_options.num_iterations == 200
         assert recipe.get_model("resnet") is not None
