@@ -2,6 +2,12 @@
   release: "v50",
   confirmed: false,
 
+  // ターゲット環境
+  target: {
+    chip: "chipX",
+    toolset_version: "2.40.0",
+  },
+
   // 共通コンパイルオプション (個別設定がなければこれが使われる)
   compile_options: {
     optimization_level: 2,
