@@ -33,11 +33,12 @@ class ModelCompile(CommandBuilder):
     model_path: Path
     output: Path
     optimization_level: int
+    compiler_path: str = "model-compiler"
     compile_lib: str = ""
     compile_flags: tuple[str, ...] = ()
 
     def build(self) -> list[str]:
-        cmd = ["model-compiler"]
+        cmd = [self.compiler_path]
         if self.compile_lib:
             cmd += ["-l", self.compile_lib]
         cmd += list(self.compile_flags)
@@ -54,11 +55,12 @@ class RuntimeExec(CommandBuilder):
     compiled_path: Path
     profile_output: Path
     num_iterations: int
+    runtime_path: str = "model-runtime"
     runtime_lib: str = ""
     runtime_flags: tuple[str, ...] = ()
 
     def build(self) -> list[str]:
-        cmd = ["model-runtime"]
+        cmd = [self.runtime_path]
         if self.runtime_lib:
             cmd += ["-l", self.runtime_lib]
         cmd += list(self.runtime_flags)
@@ -132,6 +134,7 @@ class DownloadModel(ProcessBase):
 class CompileModel(ProcessBase):
     model_name: str = "default"
     optimization_level: int = 2
+    compiler_path: str = "model-compiler"
     compile_lib: str = ""
     compile_flags: tuple[str, ...] = ()
     version: str = "1.0.0"
@@ -144,6 +147,7 @@ class CompileModel(ProcessBase):
     def params(self) -> dict:
         return {
             "optimization_level": self.optimization_level,
+            "compiler_path": self.compiler_path,
             "compile_lib": self.compile_lib,
             "compile_flags": list(self.compile_flags),
         }
@@ -156,6 +160,7 @@ class CompileModel(ProcessBase):
             model_path=model_art.path,
             output=cpp_path,
             optimization_level=self.optimization_level,
+            compiler_path=self.compiler_path,
             compile_lib=self.compile_lib,
             compile_flags=self.compile_flags,
         )
@@ -195,6 +200,7 @@ namespace model {{
 class RunModel(ProcessBase):
     model_name: str = "default"
     num_iterations: int = 100
+    runtime_path: str = "model-runtime"
     runtime_lib: str = ""
     runtime_flags: tuple[str, ...] = ()
     version: str = "1.0.0"
@@ -207,6 +213,7 @@ class RunModel(ProcessBase):
     def params(self) -> dict:
         return {
             "num_iterations": self.num_iterations,
+            "runtime_path": self.runtime_path,
             "runtime_lib": self.runtime_lib,
             "runtime_flags": list(self.runtime_flags),
         }
@@ -219,6 +226,7 @@ class RunModel(ProcessBase):
             compiled_path=compiled_art.path,
             profile_output=profile_path,
             num_iterations=self.num_iterations,
+            runtime_path=self.runtime_path,
             runtime_lib=self.runtime_lib,
             runtime_flags=self.runtime_flags,
         )

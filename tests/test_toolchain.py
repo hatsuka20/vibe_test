@@ -1,5 +1,7 @@
 """toolchain モジュールの単体テスト."""
 
+from pathlib import Path
+
 import pytest
 
 from toolchain import ChipProfile, Toolchain
@@ -37,3 +39,27 @@ class TestToolchain:
         tc_x = Toolchain("chipX")
         tc_y = Toolchain("chipY")
         assert tc_x.runtime_flags != tc_y.runtime_flags
+
+
+class TestToolsetVersion:
+    def test_old_version_uses_hoge_tools(self) -> None:
+        """2.43.0 より前は /opt/hoge_tools."""
+        tc = Toolchain("chipX", toolset_version="2.40.0")
+        assert tc.tools_dir == Path("/opt/hoge_tools")
+        assert tc.compiler_path == Path("/opt/hoge_tools/bin/model-compiler")
+        assert tc.runtime_path == Path("/opt/hoge_tools/bin/model-runtime")
+
+    def test_new_version_uses_fuga_tools(self) -> None:
+        """2.43.0 以降は /opt/fuga_tools."""
+        tc = Toolchain("chipX", toolset_version="2.43.0")
+        assert tc.tools_dir == Path("/opt/fuga_tools")
+        assert tc.compiler_path == Path("/opt/fuga_tools/bin/model-compiler")
+        assert tc.runtime_path == Path("/opt/fuga_tools/bin/model-runtime")
+
+    def test_newer_version_uses_fuga_tools(self) -> None:
+        tc = Toolchain("chipY", toolset_version="3.0.0")
+        assert tc.tools_dir == Path("/opt/fuga_tools")
+
+    def test_version_preserved(self) -> None:
+        tc = Toolchain("chipX", toolset_version="2.41.5")
+        assert tc.toolset_version == "2.41.5"

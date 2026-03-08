@@ -1,7 +1,8 @@
-"""ターゲットチップに応じた内部パラメータの解決.
+"""ターゲットチップとツールセットバージョンに応じた内部パラメータの解決.
 
 ユーザはレシピで chip 名 (chipX, chipY, ...) のみ指定する.
-Toolchain がチップ名から具体的なリンクライブラリ・コンパイラフラグ等を解決する.
+Toolchain がチップ名 + ツールセットバージョンから具体的なパス・
+リンクライブラリ・コンパイラフラグ等を解決する.
 """
 
 from __future__ import annotations
@@ -46,20 +47,49 @@ _CHIP_PROFILES: dict[str, ChipProfile] = {
 }
 
 
-class Toolchain:
-    """チップ名からコンパイル・ランタイムの内部パラメータを解決する."""
+def _resolve_tools_dir(toolset_version: str) -> Path:
+    """ツールセットバージョンからインストールディレクトリを解決する."""
+    major, minor, _patch = (int(x) for x in toolset_version.split("."))
+    if (major, minor) >= (2, 43):
+        return Path("/opt/fuga_tools")
+    return Path("/opt/hoge_tools")
 
-    def __init__(self, chip: str) -> None:
+
+class Toolchain:
+    """チップ名 + ツールセットバージョンからパラメータを解決する."""
+
+    def __init__(self, chip: str, toolset_version: str = "2.40.0") -> None:
         if chip not in _CHIP_PROFILES:
             raise ValueError(
                 f"Unknown chip: {chip!r}. "
                 f"Available: {', '.join(sorted(_CHIP_PROFILES))}"
             )
         self._profile = _CHIP_PROFILES[chip]
+        self._toolset_version = toolset_version
+        self._tools_dir = _resolve_tools_dir(toolset_version)
 
     @property
     def chip(self) -> str:
         return self._profile.chip
+
+    @property
+    def toolset_version(self) -> str:
+        return self._toolset_version
+
+    @property
+    def tools_dir(self) -> Path:
+        """ツールセットのインストールディレクトリ."""
+        return self._tools_dir
+
+    @property
+    def compiler_path(self) -> Path:
+        """コンパイラの実行パス."""
+        return self._tools_dir / "bin" / "model-compiler"
+
+    @property
+    def runtime_path(self) -> Path:
+        """ランタイムの実行パス."""
+        return self._tools_dir / "bin" / "model-runtime"
 
     @property
     def compile_lib(self) -> str:

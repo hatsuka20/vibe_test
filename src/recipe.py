@@ -15,8 +15,9 @@ class RunOptions(BaseModel):
 
 
 class TargetConfig(BaseModel):
-    """ターゲットチップの指定. ユーザはチップ名のみ指定する."""
+    """ターゲット環境の指定."""
     chip: str = "chipX"
+    toolset_version: str = "2.40.0"
 
 
 class ModelConfig(BaseModel):
