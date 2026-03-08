@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,9 +84,11 @@ class DryRunEnvironment(Environment):
 
     def __init__(self) -> None:
         self.history: list[CommandBuilder] = []
+        self._lock = threading.Lock()
 
     def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
-        self.history.append(command)
+        with self._lock:
+            self.history.append(command)
         return CommandResult(
             command=command.build(),
             returncode=0,

@@ -5,8 +5,14 @@ import logging
 from pathlib import Path
 
 from environment import DryRunEnvironment
-from pipeline import ExecContext, Pipeline, RunContext
-from processes import CompileModel, DownloadModel, FormatProfile, RunModel
+from pipeline import ExecContext, Map, Pipeline, Reduce, RunContext
+from processes import (
+    AggregateProfile,
+    CompileModel,
+    DownloadModel,
+    FormatProfile,
+    RunModel,
+)
 
 class Args(argparse.Namespace):
     experiment_name: str
@@ -31,10 +37,11 @@ def main() -> None:
     exec_ctx = ExecContext(out_dir=out_dir, temp_dir=temp_dir, logger=logger, env=env)
 
     pipeline = Pipeline([
-        DownloadModel(),
-        CompileModel(),
-        RunModel(),
-        FormatProfile(),
+        DownloadModel(release="v50"),
+        Map(CompileModel),
+        Map(RunModel),
+        Map(FormatProfile),
+        Reduce(AggregateProfile),
     ])
 
     ctx = pipeline.run(ctx, exec_ctx)

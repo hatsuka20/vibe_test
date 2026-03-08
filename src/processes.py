@@ -57,30 +57,39 @@ class RuntimeExec(CommandBuilder):
 
 # ---------------------------------------------------------------------------
 # Process A: リモートサーバからモデルをダウンロードする (mock)
+#   動的 produces: 実行時にモデル名を発見し model.<name> を生成
 # ---------------------------------------------------------------------------
 @dataclass
 class DownloadModel(ProcessBase):
-    name: str = "download_model"
-    produces: list[str] = field(default_factory=lambda: ["model"])
+    release: str = "v50"
+    url_base: str = "https://example.com/models"
     version: str = "1.0.0"
 
-    url: str = "https://example.com/models/resnet50.onnx"
+    def __post_init__(self) -> None:
+        self.name = "download_models"
+        self.produces = []  # 動的 produces
 
     def params(self) -> dict:
-        return {"url": self.url}
+        return {"release": self.release, "url_base": self.url_base}
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        model_path = exec_ctx.out_dir / "resnet50.onnx"
+        # Mock: 実行時にモデルを発見
+        model_names = ["resnet", "vgg"]
 
-        cmd = CurlDownload(url=self.url, output=model_path)
-        exec_ctx.logger.info("[A] モデルをダウンロード中: %s", self.url)
-        _result = exec_ctx.env.run(cmd)
+        result = {}
+        for name in model_names:
+            model_path = exec_ctx.out_dir / f"{name}.onnx"
+            cmd = CurlDownload(url=f"{self.url_base}/{name}.onnx", output=model_path)
+            exec_ctx.logger.info("[A] モデルをダウンロード中: %s", cmd.url)
+            exec_ctx.env.run(cmd)
 
-        # mock: 実コマンドの代わりにダミーファイルを生成
-        model_path.write_bytes(b"\x00MOCK_ONNX_MODEL_WEIGHTS" * 64)
+            # mock: 実コマンドの代わりにダミーファイルを生成
+            model_path.write_bytes(b"\x00MOCK_" + name.encode() + b"_WEIGHTS" * 64)
 
-        exec_ctx.logger.info("[A] ダウンロード完了 -> %s", model_path)
-        return {"model": ProducedArtifact(model_path, "onnx", "model.onnx.v1")}
+            exec_ctx.logger.info("[A] ダウンロード完了 -> %s", model_path)
+            result[f"model.{name}"] = ProducedArtifact(model_path, "onnx", "model.onnx.v1")
+
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -88,27 +97,31 @@ class DownloadModel(ProcessBase):
 # ---------------------------------------------------------------------------
 @dataclass
 class CompileModel(ProcessBase):
-    name: str = "compile_model"
-    requires: list[str] = field(default_factory=lambda: ["model"])
-    produces: list[str] = field(default_factory=lambda: ["compiled_model"])
+    model_name: str = "default"
+    optimization_level: int = 2
     version: str = "1.0.0"
 
-    optimization_level: int = 2
+    def __post_init__(self) -> None:
+        self.name = f"compile_{self.model_name}"
+        self.requires = [f"model.{self.model_name}"]
+        self.produces = [f"compiled_model.{self.model_name}"]
 
     def params(self) -> dict:
         return {"optimization_level": self.optimization_level}
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        model_art = ctx.get("model")
-        cpp_path = exec_ctx.out_dir / "model_compiled.cpp"
+        model_art = ctx.get(f"model.{self.model_name}")
+        cpp_path = exec_ctx.out_dir / f"{self.model_name}_compiled.cpp"
 
         cmd = ModelCompile(
             model_path=model_art.path,
             output=cpp_path,
             optimization_level=self.optimization_level,
         )
-        exec_ctx.logger.info("[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level)
-        _result = exec_ctx.env.run(cmd)
+        exec_ctx.logger.info(
+            "[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level,
+        )
+        exec_ctx.env.run(cmd, cwd=exec_ctx.temp_dir)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         cpp_content = f"""\
@@ -129,7 +142,9 @@ namespace model {{
         cpp_path.write_text(cpp_content, encoding="utf-8")
 
         exec_ctx.logger.info("[B] コンパイル完了 -> %s", cpp_path)
-        return {"compiled_model": ProducedArtifact(cpp_path, "cpp", "compiled.cpp.v1")}
+        return {
+            f"compiled_model.{self.model_name}": ProducedArtifact(cpp_path, "cpp", "compiled.cpp.v1"),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -137,27 +152,31 @@ namespace model {{
 # ---------------------------------------------------------------------------
 @dataclass
 class RunModel(ProcessBase):
-    name: str = "run_model"
-    requires: list[str] = field(default_factory=lambda: ["compiled_model"])
-    produces: list[str] = field(default_factory=lambda: ["profile"])
+    model_name: str = "default"
+    num_iterations: int = 100
     version: str = "1.0.0"
 
-    num_iterations: int = 100
+    def __post_init__(self) -> None:
+        self.name = f"run_{self.model_name}"
+        self.requires = [f"compiled_model.{self.model_name}"]
+        self.produces = [f"profile.{self.model_name}"]
 
     def params(self) -> dict:
         return {"num_iterations": self.num_iterations}
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        compiled_art = ctx.get("compiled_model")
-        profile_path = exec_ctx.out_dir / "profile.json"
+        compiled_art = ctx.get(f"compiled_model.{self.model_name}")
+        profile_path = exec_ctx.out_dir / f"profile_{self.model_name}.json"
 
         cmd = RuntimeExec(
             compiled_path=compiled_art.path,
             profile_output=profile_path,
             num_iterations=self.num_iterations,
         )
-        exec_ctx.logger.info("[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations)
-        _result = exec_ctx.env.run(cmd)
+        exec_ctx.logger.info(
+            "[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations,
+        )
+        exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
         profile_data = {
@@ -176,7 +195,9 @@ class RunModel(ProcessBase):
         profile_path.write_text(json.dumps(profile_data, indent=2), encoding="utf-8")
 
         exec_ctx.logger.info("[C] 実行完了 -> %s", profile_path)
-        return {"profile": ProducedArtifact(profile_path, "json", "profile.runtime.v1")}
+        return {
+            f"profile.{self.model_name}": ProducedArtifact(profile_path, "json", "profile.runtime.v1"),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -185,13 +206,16 @@ class RunModel(ProcessBase):
 # ---------------------------------------------------------------------------
 @dataclass
 class FormatProfile(ProcessBase):
-    name: str = "format_profile"
-    requires: list[str] = field(default_factory=lambda: ["profile"])
-    produces: list[str] = field(default_factory=lambda: ["report"])
+    model_name: str = "default"
     version: str = "1.0.0"
 
+    def __post_init__(self) -> None:
+        self.name = f"format_{self.model_name}"
+        self.requires = [f"profile.{self.model_name}"]
+        self.produces = [f"report.{self.model_name}"]
+
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        profile_art = ctx.get("profile")
+        profile_art = ctx.get(f"profile.{self.model_name}")
         exec_ctx.logger.info("[D] プロファイルを整形中: %s", profile_art.path)
 
         profile = json.loads(profile_art.path.read_text(encoding="utf-8"))
@@ -223,8 +247,55 @@ class FormatProfile(ProcessBase):
             lines.append(f"  {op['name']:<16} {op['time_ms']:>10.2f} {op['memory_mb']:>12.1f}")
         lines += ["  " + "-" * 46, "=" * 60, ""]
 
-        report_path = exec_ctx.out_dir / "report.txt"
+        report_path = exec_ctx.out_dir / f"report_{self.model_name}.txt"
         report_path.write_text("\n".join(lines), encoding="utf-8")
 
         exec_ctx.logger.info("[D] レポート生成完了 -> %s", report_path)
-        return {"report": ProducedArtifact(report_path, "txt", "report.human.v1")}
+        return {
+            f"report.{self.model_name}": ProducedArtifact(report_path, "txt", "report.human.v1"),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Process E: 全モデルのレポートを集約してサマリー比較テーブルを生成する
+# ---------------------------------------------------------------------------
+@dataclass
+class AggregateProfile(ProcessBase):
+    model_names: list[str] = field(default_factory=list)
+    version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        self.name = "aggregate_profile"
+        self.requires = [f"report.{m}" for m in self.model_names]
+        self.produces = ["summary_report"]
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        exec_ctx.logger.info("[E] レポートを集約中: %s", self.model_names)
+
+        # 各モデルの profile を読み取り (report ではなく profile から数値取得)
+        summaries = []
+        for name in self.model_names:
+            report_art = ctx.get(f"report.{name}")
+            report_text = report_art.path.read_text(encoding="utf-8")
+            summaries.append({"model": name, "report": report_text})
+
+        # サマリーテーブル生成
+        lines = [
+            "=" * 60,
+            "  Aggregate Summary",
+            "=" * 60,
+            "",
+            f"  Models: {', '.join(self.model_names)}",
+            "",
+        ]
+        for s in summaries:
+            lines.append(f"  --- {s['model']} ---")
+            lines.append(s["report"])
+            lines.append("")
+        lines.append("=" * 60)
+
+        summary_path = exec_ctx.out_dir / "summary_report.txt"
+        summary_path.write_text("\n".join(lines), encoding="utf-8")
+
+        exec_ctx.logger.info("[E] 集約完了 -> %s", summary_path)
+        return {"summary_report": ProducedArtifact(summary_path, "txt", "report.summary.v1")}

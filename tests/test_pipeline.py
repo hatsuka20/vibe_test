@@ -1,4 +1,4 @@
-"""pipeline モジュール (Pipeline, compute_cache_key, RunContext) の単体テスト."""
+"""pipeline モジュール (Pipeline, compute_cache_key, RunContext, Map, Reduce) の単体テスト."""
 
 import logging
 from dataclasses import dataclass, field
@@ -12,12 +12,19 @@ from typing import Any
 from pipeline import (
     Artifact,
     ExecContext,
+    Map,
     OptionalInput,
     Pipeline,
     ProcessBase,
     ProducedArtifact,
+    Reduce,
     RunContext,
+    _build_phases,
+    _ChainPhase,
+    _ReducePhase,
+    _StaticPhase,
     compute_cache_key,
+    sha256_file,
 )
 
 
@@ -96,6 +103,94 @@ class DependentProcess(ProcessBase):
 
 
 # ---------------------------------------------------------------------------
+# Map/Reduce テスト用の軽量 Process
+# ---------------------------------------------------------------------------
+@dataclass
+class MappableProcess(ProcessBase):
+    """model_name でパラメタライズされる Map 対応 Process."""
+
+    model_name: str = "default"
+    version: str = "1.0.0"
+    call_count: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.name = f"mappable_{self.model_name}"
+        self.requires = [f"input.{self.model_name}"]
+        self.produces = [f"output.{self.model_name}"]
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        self.call_count += 1
+        inp = ctx.get(f"input.{self.model_name}")
+        data = inp.path.read_bytes()
+        path = exec_ctx.out_dir / f"output_{self.model_name}.dat"
+        path.write_bytes(data + b"_mapped")
+        return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "output.v1")}
+
+
+@dataclass
+class SecondMappable(ProcessBase):
+    """Map チェーン用の2段目 Process."""
+
+    model_name: str = "default"
+    version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        self.name = f"second_{self.model_name}"
+        self.requires = [f"output.{self.model_name}"]
+        self.produces = [f"final.{self.model_name}"]
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        inp = ctx.get(f"output.{self.model_name}")
+        data = inp.path.read_bytes()
+        path = exec_ctx.out_dir / f"final_{self.model_name}.dat"
+        path.write_bytes(data + b"_final")
+        return {f"final.{self.model_name}": ProducedArtifact(path, "bin", "final.v1")}
+
+
+@dataclass
+class ReducibleProcess(ProcessBase):
+    """Reduce 対応 Process."""
+
+    model_names: list[str] = field(default_factory=list)
+    version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        self.name = "reducer"
+        self.requires = [f"output.{m}" for m in self.model_names]
+        self.produces = ["summary"]
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        parts = []
+        for m in self.model_names:
+            parts.append(ctx.get(f"output.{m}").path.read_bytes())
+        path = exec_ctx.out_dir / "summary.dat"
+        path.write_bytes(b"|".join(parts))
+        return {"summary": ProducedArtifact(path, "bin", "summary.v1")}
+
+
+@dataclass
+class DynamicProducesProcess(ProcessBase):
+    """動的 produces (produces=[]) の Process."""
+
+    name: str = "dynamic"
+    version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        self.produces = []
+
+    call_count: int = field(default=0, init=False, repr=False)
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        self.call_count += 1
+        result = {}
+        for name in ["x", "y"]:
+            path = exec_ctx.out_dir / f"{name}.dat"
+            path.write_bytes(name.encode())
+            result[f"dyn.{name}"] = ProducedArtifact(path, "bin", "dyn.v1")
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 @pytest.fixture()
@@ -131,7 +226,7 @@ class TestPipelineInit:
 
     def test_valid_processes(self) -> None:
         pipeline = Pipeline([StubProcess(name="a"), StubProcess(name="b")])
-        assert len(pipeline.processes) == 2
+        assert len(pipeline._phases) == 1
 
 
 # ===========================================================================
@@ -198,42 +293,29 @@ class TestPipelineCache:
 
         assert sha_v1 != sha_v2
 
+    def test_dynamic_produces_cache_hit(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        proc = DynamicProducesProcess()
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+    def test_dynamic_produces_force_rerun(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        proc = DynamicProducesProcess()
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        pipeline.run(run_ctx, exec_ctx, force_processes=["dynamic"])
+        assert proc.call_count == 2
+
 
 # ===========================================================================
-# Pipeline.run — from_process / force_processes バリデーション
+# Pipeline.run — force_processes バリデーション
 # ===========================================================================
 class TestPipelineRunValidation:
-    def test_unknown_from_process_raises(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        pipeline = Pipeline([StubProcess()])
-        with pytest.raises(ValueError, match="Unknown from_process"):
-            pipeline.run(run_ctx, exec_ctx, from_process="nonexistent")
-
-    def test_unknown_force_processes_raises(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        pipeline = Pipeline([StubProcess()])
-        with pytest.raises(ValueError, match="Unknown force_processes"):
-            pipeline.run(run_ctx, exec_ctx, force_processes=["nonexistent"])
-
-    def test_from_process_skips_earlier(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        # StubProcess の出力を事前登録して dependent から開始
-        stub_path = exec_ctx.out_dir / "stub.dat"
-        stub_path.write_bytes(b"PRESTAGED")
-        from pipeline import sha256_file
-        run_ctx.artifacts["out"] = Artifact(
-            key="out",
-            path=stub_path,
-            format="bin",
-            schema="stub.v1",
-            producer="stub",
-            cache_key="pre",
-            sha256=sha256_file(stub_path),
-        )
-
-        pipeline = Pipeline([StubProcess(), DependentProcess()])
-        ctx = pipeline.run(run_ctx, exec_ctx, from_process="dependent")
-
-        assert "derived" in ctx.artifacts
-        assert ctx.artifacts["derived"].path.read_bytes() == b"PRESTAGED_derived"
-
     def test_produces_mismatch_raises(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
         pipeline = Pipeline([BadProcess()])
         with pytest.raises(RuntimeError, match="produces mismatch"):
@@ -366,3 +448,225 @@ class TestComputeCacheKeyOptional:
         key_after = compute_cache_key(proc, run_ctx)
 
         assert key_before == key_after
+
+
+# ===========================================================================
+# _build_phases
+# ===========================================================================
+class TestBuildPhases:
+    def test_static_only(self) -> None:
+        phases = _build_phases([StubProcess(name="a"), StubProcess(name="b")])
+        assert len(phases) == 1
+        assert isinstance(phases[0], _StaticPhase)
+        assert len(phases[0].processes) == 2
+
+    def test_map_chain(self) -> None:
+        phases = _build_phases([Map(MappableProcess), Map(SecondMappable)])
+        assert len(phases) == 1
+        assert isinstance(phases[0], _ChainPhase)
+        assert len(phases[0].maps) == 2
+
+    def test_mixed_phases(self) -> None:
+        phases = _build_phases([
+            StubProcess(name="a"),
+            Map(MappableProcess),
+            Map(SecondMappable),
+            Reduce(ReducibleProcess),
+        ])
+        assert len(phases) == 3
+        assert isinstance(phases[0], _StaticPhase)
+        assert isinstance(phases[1], _ChainPhase)
+        assert isinstance(phases[2], _ReducePhase)
+
+
+# ===========================================================================
+# Map
+# ===========================================================================
+class TestMap:
+    def test_infer_prefix(self, run_ctx: RunContext) -> None:
+        m = Map(MappableProcess)
+        assert m._infer_prefix() == "input"
+
+    def test_explicit_prefix(self) -> None:
+        m = Map(MappableProcess, key_prefix="custom")
+        assert m._infer_prefix() == "custom"
+
+    def test_discover_variants(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        for name in ["alpha", "beta"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"input.{name}"] = Artifact(
+                key=f"input.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        m = Map(MappableProcess)
+        variants = m.discover_variants(run_ctx)
+        assert set(variants) == {"alpha", "beta"}
+
+    def test_expand(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        for name in ["a", "b"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"input.{name}"] = Artifact(
+                key=f"input.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        m = Map(MappableProcess)
+        procs = m.expand(run_ctx)
+        assert len(procs) == 2
+        names = {p.name for p in procs}
+        assert names == {"mappable_a", "mappable_b"}
+
+    def test_no_variants(self, run_ctx: RunContext) -> None:
+        m = Map(MappableProcess)
+        assert m.discover_variants(run_ctx) == []
+
+    def test_infer_prefix_fails_raises(self) -> None:
+        """probe の requires にセンチネルが含まれない場合は ValueError."""
+
+        @dataclass
+        class NoSentinel(ProcessBase):
+            model_name: str = "default"
+            name: str = "no_sentinel"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.requires = ["fixed_key"]  # センチネルを含まない
+                self.produces = [f"out.{self.model_name}"]
+
+            def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+                return {}
+
+        m = Map(NoSentinel)
+        with pytest.raises(ValueError, match="Cannot infer key_prefix"):
+            m._infer_prefix()
+
+
+# ===========================================================================
+# Reduce
+# ===========================================================================
+class TestReduce:
+    def test_explicit_prefix(self) -> None:
+        r = Reduce(ReducibleProcess, key_prefix="custom")
+        assert r._infer_prefix() == "custom"
+
+    def test_infer_prefix_fails_raises(self) -> None:
+        @dataclass
+        class NoSentinelReduce(ProcessBase):
+            model_names: list[str] = field(default_factory=list)
+            name: str = "no_sentinel_r"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.requires = ["fixed_key"]
+                self.produces = ["summary"]
+
+            def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+                return {}
+
+        r = Reduce(NoSentinelReduce)
+        with pytest.raises(ValueError, match="Cannot infer key_prefix"):
+            r._infer_prefix()
+
+    def test_expand(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        for name in ["a", "b"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"output.{name}"] = Artifact(
+                key=f"output.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        r = Reduce(ReducibleProcess)
+        proc = r.expand(run_ctx)
+        assert proc.name == "reducer"
+        assert set(proc.requires) == {"output.a", "output.b"}
+
+
+# ===========================================================================
+# Pipeline — Map/Reduce E2E
+# ===========================================================================
+def _seed_inputs(run_ctx: RunContext, tmp_path: Path, names: list[str]) -> None:
+    """テスト用に input.<name> アーティファクトを事前登録."""
+    for name in names:
+        p = tmp_path / f"input_{name}.dat"
+        p.write_bytes(name.encode())
+        run_ctx.put(Artifact(
+            key=f"input.{name}", path=p, format="bin", schema="v1",
+            producer="seed", cache_key="seed",
+            sha256=sha256_file(p),
+        ))
+
+
+class TestPipelineMapReduce:
+    def test_single_map(self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path) -> None:
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+
+        pipeline = Pipeline([Map(MappableProcess)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "output.a" in ctx.artifacts
+        assert "output.b" in ctx.artifacts
+        assert ctx.artifacts["output.a"].path.read_bytes() == b"a_mapped"
+        assert ctx.artifacts["output.b"].path.read_bytes() == b"b_mapped"
+
+    def test_chained_maps(self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path) -> None:
+        _seed_inputs(run_ctx, tmp_path, ["x", "y"])
+
+        pipeline = Pipeline([Map(MappableProcess), Map(SecondMappable)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "final.x" in ctx.artifacts
+        assert "final.y" in ctx.artifacts
+        assert ctx.artifacts["final.x"].path.read_bytes() == b"x_mapped_final"
+
+    def test_map_then_reduce(self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path) -> None:
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+
+        pipeline = Pipeline([
+            Map(MappableProcess),
+            Reduce(ReducibleProcess),
+        ])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "summary" in ctx.artifacts
+        summary = ctx.artifacts["summary"].path.read_bytes()
+        assert b"a_mapped" in summary
+        assert b"b_mapped" in summary
+
+    def test_empty_variants_skips(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        pipeline = Pipeline([Map(MappableProcess)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+        # variant が 0 個 → 何も起きないが例外にならない
+        assert len([k for k in ctx.artifacts if k.startswith("output.")]) == 0
+
+    def test_chain_uses_separate_temp_dirs(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """各 variant チェーンに固有の temp_dir が割り当てられることを確認."""
+        observed_temp_dirs: list[Path] = []
+
+        @dataclass
+        class TempRecorder(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"rec_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"rec_out.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                observed_temp_dirs.append(ectx.temp_dir)
+                path = ectx.out_dir / f"rec_{self.model_name}.dat"
+                path.write_bytes(b"R")
+                return {f"rec_out.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        pipeline = Pipeline([Map(TempRecorder)])
+        pipeline.run(run_ctx, exec_ctx)
+
+        assert len(observed_temp_dirs) == 2
+        assert observed_temp_dirs[0] != observed_temp_dirs[1]

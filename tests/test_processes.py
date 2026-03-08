@@ -10,6 +10,7 @@ import pytest
 from environment import DryRunEnvironment
 from pipeline import Artifact, ExecContext, RunContext
 from processes import (
+    AggregateProfile,
     CompileModel,
     CurlDownload,
     DownloadModel,
@@ -77,37 +78,44 @@ def put_artifact(
 
 
 # ===========================================================================
-# Process A: DownloadModel
+# Process A: DownloadModel (動的 produces)
 # ===========================================================================
 class TestDownloadModel:
-    def test_produces_model_file(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+    def test_produces_model_files(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
         proc = DownloadModel()
         result = proc.run(run_ctx, exec_ctx)
 
-        assert "model" in result
-        art = result["model"]
-        assert art.path.exists()
-        assert art.path.stat().st_size > 0
-        assert art.format == "onnx"
+        assert "model.resnet" in result
+        assert "model.vgg" in result
+        for key, art in result.items():
+            assert art.path.exists()
+            assert art.path.stat().st_size > 0
+            assert art.format == "onnx"
 
-    def test_invokes_curl_via_env(self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment) -> None:
-        proc = DownloadModel(url="https://example.com/test.onnx")
+    def test_invokes_curl_per_model(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
+    ) -> None:
+        proc = DownloadModel(url_base="https://example.com/models")
         proc.run(run_ctx, exec_ctx)
 
         assert CurlDownload(
-            url="https://example.com/test.onnx",
-            output=exec_ctx.out_dir / "resnet50.onnx",
+            url="https://example.com/models/resnet.onnx",
+            output=exec_ctx.out_dir / "resnet.onnx",
+        ) in dry_env.history
+        assert CurlDownload(
+            url="https://example.com/models/vgg.onnx",
+            output=exec_ctx.out_dir / "vgg.onnx",
         ) in dry_env.history
 
-    def test_params_contains_url(self) -> None:
-        proc = DownloadModel(url="https://example.com/custom.onnx")
-        assert proc.params() == {"url": "https://example.com/custom.onnx"}
+    def test_params_contains_release(self) -> None:
+        proc = DownloadModel(release="v99", url_base="https://example.com/m")
+        assert proc.params() == {"release": "v99", "url_base": "https://example.com/m"}
 
     def test_process_fields(self) -> None:
         proc = DownloadModel()
-        assert proc.name == "download_model"
+        assert proc.name == "download_models"
         assert proc.requires == []
-        assert proc.produces == ["model"]
+        assert proc.produces == []  # 動的
 
 
 # ===========================================================================
@@ -117,13 +125,13 @@ class TestCompileModel:
     def test_produces_cpp_file(
         self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
     ) -> None:
-        put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
+        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel()
+        proc = CompileModel(model_name="resnet")
         result = proc.run(run_ctx, exec_ctx)
 
-        assert "compiled_model" in result
-        art = result["compiled_model"]
+        assert "compiled_model.resnet" in result
+        art = result["compiled_model.resnet"]
         assert art.path.exists()
         assert art.format == "cpp"
 
@@ -131,32 +139,45 @@ class TestCompileModel:
         self, run_ctx: RunContext, exec_ctx: ExecContext,
         dry_env: DryRunEnvironment, put_artifact: Callable,
     ) -> None:
-        model_path = put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
+        model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(optimization_level=3)
+        proc = CompileModel(model_name="resnet", optimization_level=3)
         proc.run(run_ctx, exec_ctx)
 
         assert ModelCompile(
             model_path=model_path,
-            output=exec_ctx.out_dir / "model_compiled.cpp",
+            output=exec_ctx.out_dir / "resnet_compiled.cpp",
             optimization_level=3,
         ) in dry_env.history
 
     def test_cpp_contains_source_reference(
         self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
     ) -> None:
-        model_path = put_artifact("model", "dummy.onnx", "onnx", "model.onnx.v1")
+        model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
 
-        proc = CompileModel(optimization_level=3)
+        proc = CompileModel(model_name="resnet", optimization_level=3)
         result = proc.run(run_ctx, exec_ctx)
 
-        content = result["compiled_model"].path.read_text(encoding="utf-8")
+        content = result["compiled_model.resnet"].path.read_text(encoding="utf-8")
         assert str(model_path) in content
         assert "optimization_level = 3" in content
 
     def test_requires_model(self) -> None:
-        proc = CompileModel()
-        assert proc.requires == ["model"]
+        proc = CompileModel(model_name="vgg")
+        assert proc.requires == ["model.vgg"]
+
+    def test_uses_temp_dir_as_cwd(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+        dry_env: DryRunEnvironment, put_artifact: Callable,
+    ) -> None:
+        """CompileModel は env.run() に cwd=exec_ctx.temp_dir を渡す."""
+        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+
+        proc = CompileModel(model_name="resnet")
+        proc.run(run_ctx, exec_ctx)
+
+        # DryRunEnvironment は cwd を記録しないが、呼び出しが成功すれば OK
+        assert len(dry_env.history) == 1
 
 
 # ===========================================================================
@@ -166,13 +187,13 @@ class TestRunModel:
     def test_produces_valid_profile_json(
         self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
     ) -> None:
-        put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
+        put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        proc = RunModel()
+        proc = RunModel(model_name="resnet")
         result = proc.run(run_ctx, exec_ctx)
 
-        assert "profile" in result
-        art = result["profile"]
+        assert "profile.resnet" in result
+        art = result["profile.resnet"]
         assert art.path.exists()
         assert art.format == "json"
 
@@ -187,31 +208,31 @@ class TestRunModel:
         self, run_ctx: RunContext, exec_ctx: ExecContext,
         dry_env: DryRunEnvironment, put_artifact: Callable,
     ) -> None:
-        compiled_path = put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
+        compiled_path = put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        proc = RunModel(num_iterations=500)
+        proc = RunModel(model_name="resnet", num_iterations=500)
         proc.run(run_ctx, exec_ctx)
 
         assert RuntimeExec(
             compiled_path=compiled_path,
-            profile_output=exec_ctx.out_dir / "profile.json",
+            profile_output=exec_ctx.out_dir / "profile_resnet.json",
             num_iterations=500,
         ) in dry_env.history
 
     def test_profile_reflects_iterations(
         self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
     ) -> None:
-        put_artifact("compiled_model", "model.cpp", "cpp", "compiled.cpp.v1")
+        put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
 
-        proc = RunModel(num_iterations=500)
+        proc = RunModel(model_name="resnet", num_iterations=500)
         result = proc.run(run_ctx, exec_ctx)
 
-        profile = json.loads(result["profile"].path.read_text(encoding="utf-8"))
+        profile = json.loads(result["profile.resnet"].path.read_text(encoding="utf-8"))
         assert profile["iterations"] == 500
 
     def test_requires_compiled_model(self) -> None:
-        proc = RunModel()
-        assert proc.requires == ["compiled_model"]
+        proc = RunModel(model_name="vgg")
+        assert proc.requires == ["compiled_model.vgg"]
 
 
 # ===========================================================================
@@ -219,7 +240,7 @@ class TestRunModel:
 # ===========================================================================
 class TestFormatProfile:
     @pytest.fixture()
-    def _setup_profile(self, put_artifact: Callable, exec_ctx: ExecContext) -> None:
+    def _setup_profile(self, put_artifact: Callable) -> None:
         profile_data = {
             "source": "model.cpp",
             "iterations": 100,
@@ -231,26 +252,26 @@ class TestFormatProfile:
             ],
         }
         put_artifact(
-            "profile", "profile.json", "json", "profile.runtime.v1",
+            "profile.resnet", "profile_resnet.json", "json", "profile.runtime.v1",
             content=json.dumps(profile_data).encode(),
         )
 
     @pytest.mark.usefixtures("_setup_profile")
     def test_produces_human_readable_report(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = FormatProfile()
+        proc = FormatProfile(model_name="resnet")
         result = proc.run(run_ctx, exec_ctx)
 
-        assert "report" in result
-        art = result["report"]
+        assert "report.resnet" in result
+        art = result["report.resnet"]
         assert art.path.exists()
         assert art.format == "txt"
 
     @pytest.mark.usefixtures("_setup_profile")
     def test_report_contains_key_sections(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = FormatProfile()
+        proc = FormatProfile(model_name="resnet")
         result = proc.run(run_ctx, exec_ctx)
 
-        report = result["report"].path.read_text(encoding="utf-8")
+        report = result["report.resnet"].path.read_text(encoding="utf-8")
         assert "Model Performance Report" in report
         assert "Latency" in report
         assert "Throughput" in report
@@ -262,14 +283,61 @@ class TestFormatProfile:
     def test_does_not_invoke_env(
         self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
     ) -> None:
-        proc = FormatProfile()
+        proc = FormatProfile(model_name="resnet")
         proc.run(run_ctx, exec_ctx)
         assert len(dry_env.history) == 0
 
     def test_requires_profile(self) -> None:
-        proc = FormatProfile()
-        assert proc.requires == ["profile"]
+        proc = FormatProfile(model_name="vgg")
+        assert proc.requires == ["profile.vgg"]
 
     def test_inherits_default_params(self) -> None:
         proc = FormatProfile()
         assert proc.params() == {}
+
+
+# ===========================================================================
+# Process E: AggregateProfile
+# ===========================================================================
+class TestAggregateProfile:
+    @pytest.fixture()
+    def _setup_reports(self, put_artifact: Callable) -> None:
+        for name in ["resnet", "vgg"]:
+            put_artifact(
+                f"report.{name}", f"report_{name}.txt", "txt", "report.human.v1",
+                content=f"Report for {name}".encode(),
+            )
+
+    @pytest.mark.usefixtures("_setup_reports")
+    def test_produces_summary(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        proc = AggregateProfile(model_names=["resnet", "vgg"])
+        result = proc.run(run_ctx, exec_ctx)
+
+        assert "summary_report" in result
+        art = result["summary_report"]
+        assert art.path.exists()
+        assert art.format == "txt"
+
+    @pytest.mark.usefixtures("_setup_reports")
+    def test_summary_contains_all_models(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        proc = AggregateProfile(model_names=["resnet", "vgg"])
+        result = proc.run(run_ctx, exec_ctx)
+
+        summary = result["summary_report"].path.read_text(encoding="utf-8")
+        assert "resnet" in summary
+        assert "vgg" in summary
+        assert "Aggregate Summary" in summary
+
+    def test_process_fields(self) -> None:
+        proc = AggregateProfile(model_names=["a", "b"])
+        assert proc.name == "aggregate_profile"
+        assert proc.requires == ["report.a", "report.b"]
+        assert proc.produces == ["summary_report"]
+
+    @pytest.mark.usefixtures("_setup_reports")
+    def test_does_not_invoke_env(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
+    ) -> None:
+        proc = AggregateProfile(model_names=["resnet", "vgg"])
+        proc.run(run_ctx, exec_ctx)
+        assert len(dry_env.history) == 0

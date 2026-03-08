@@ -1,7 +1,9 @@
 import hashlib
 import json
 import logging
+import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -57,22 +59,26 @@ class RunContext:
     artifacts: dict[str, Artifact] = field(default_factory=dict)
 
     manifest_path: Path = field(init=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.manifest_path = self.run_dir / "manifest.json"
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
     def get(self, key: str) -> Artifact:
-        if key not in self.artifacts:
-            raise KeyError(f"Missing artifact: {key}")
-        return self.artifacts[key]
+        with self._lock:
+            if key not in self.artifacts:
+                raise KeyError(f"Missing artifact: {key}")
+            return self.artifacts[key]
 
     def get_optional(self, key: str) -> Artifact | None:
-        return self.artifacts.get(key)
+        with self._lock:
+            return self.artifacts.get(key)
 
     def put(self, art: Artifact) -> None:
-        self.artifacts[art.key] = art
-        self.save_manifest()
+        with self._lock:
+            self.artifacts[art.key] = art
+            self.save_manifest()
 
     def save_manifest(self) -> None:
         def _serialize(v: Artifact) -> dict[str, Any]:
@@ -169,13 +175,206 @@ def compute_cache_key(process: ProcessBase, ctx: RunContext) -> str:
     return sha256_bytes(stable_json_dumps(payload))
 
 
+# ---------------------------------------------------------------------------
+# Map / Reduce ディスクリプタ
+# ---------------------------------------------------------------------------
+_PROBE_SENTINEL = "__PROBE__"
+
+
+@dataclass(frozen=True)
+class Map:
+    """variant ごとに process_class のインスタンスを生成する."""
+    process_class: type[ProcessBase]
+    key_prefix: str = ""
+
+    def _infer_prefix(self) -> str:
+        if self.key_prefix:
+            return self.key_prefix
+        probe = self.process_class(model_name=_PROBE_SENTINEL)  # type: ignore[call-arg]
+        for req in probe.requires:
+            if req.endswith(f".{_PROBE_SENTINEL}"):
+                return req.rsplit(".", 1)[0]
+        raise ValueError(
+            f"Cannot infer key_prefix for {self.process_class.__name__}. "
+            f"Provide key_prefix explicitly."
+        )
+
+    def discover_variants(self, ctx: RunContext) -> list[str]:
+        prefix = self._infer_prefix()
+        variants = []
+        for key in ctx.artifacts:
+            if key.startswith(prefix + "."):
+                variant = key[len(prefix) + 1:]
+                if variant not in variants:
+                    variants.append(variant)
+        return variants
+
+    def expand(self, ctx: RunContext) -> list[ProcessBase]:
+        variants = self.discover_variants(ctx)
+        return [self.process_class(model_name=v) for v in variants]  # type: ignore[call-arg]
+
+
+@dataclass(frozen=True)
+class Reduce:
+    """全 variant の成果物を集約する process_class のインスタンスを生成する."""
+    process_class: type[ProcessBase]
+    key_prefix: str = ""
+
+    def _infer_prefix(self) -> str:
+        if self.key_prefix:
+            return self.key_prefix
+        probe = self.process_class(model_names=[_PROBE_SENTINEL])  # type: ignore[call-arg]
+        for req in probe.requires:
+            if req.endswith(f".{_PROBE_SENTINEL}"):
+                return req.rsplit(".", 1)[0]
+        raise ValueError(
+            f"Cannot infer key_prefix for {self.process_class.__name__}. "
+            f"Provide key_prefix explicitly."
+        )
+
+    def discover_variants(self, ctx: RunContext) -> list[str]:
+        prefix = self._infer_prefix()
+        variants = []
+        for key in ctx.artifacts:
+            if key.startswith(prefix + "."):
+                variant = key[len(prefix) + 1:]
+                if variant not in variants:
+                    variants.append(variant)
+        return variants
+
+    def expand(self, ctx: RunContext) -> ProcessBase:
+        variants = self.discover_variants(ctx)
+        return self.process_class(model_names=variants)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline 内部の Phase 表現
+# ---------------------------------------------------------------------------
+Step = ProcessBase | Map | Reduce
+
+
+@dataclass
+class _StaticPhase:
+    processes: list[ProcessBase]
+
+
+@dataclass
+class _ChainPhase:
+    maps: list[Map]
+
+
+@dataclass
+class _ReducePhase:
+    reduce: Reduce
+
+
+_Phase = _StaticPhase | _ChainPhase | _ReducePhase
+
+
+def _build_phases(steps: Sequence[Step]) -> list[_Phase]:
+    phases: list[_Phase] = []
+    for step in steps:
+        if isinstance(step, ProcessBase):
+            if phases and isinstance(phases[-1], _StaticPhase):
+                phases[-1].processes.append(step)
+            else:
+                phases.append(_StaticPhase(processes=[step]))
+        elif isinstance(step, Map):
+            if phases and isinstance(phases[-1], _ChainPhase):
+                phases[-1].maps.append(step)
+            else:
+                phases.append(_ChainPhase(maps=[step]))
+        elif isinstance(step, Reduce):
+            phases.append(_ReducePhase(reduce=step))
+    return phases
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+def _check_cache_static(proc: ProcessBase, ck: str, ctx: RunContext) -> bool:
+    """静的 produces のキャッシュ判定."""
+    for pk in proc.produces:
+        art = ctx.artifacts.get(pk)
+        if not art or art.cache_key != ck or not art.path.exists() or sha256_file(art.path) != art.sha256:
+            return False
+    return True
+
+
+def _check_cache_dynamic(proc: ProcessBase, ck: str, ctx: RunContext) -> bool:
+    """動的 produces (produces=[]) のキャッシュ判定. producer 名で検索."""
+    prev = [a for a in ctx.artifacts.values() if a.producer == proc.name]
+    if not prev:
+        return False
+    return all(
+        a.cache_key == ck and a.path.exists() and sha256_file(a.path) == a.sha256
+        for a in prev
+    )
+
+
+def _execute_one(
+    proc: ProcessBase,
+    ctx: RunContext,
+    exec_ctx: ExecContext,
+    *,
+    force: set[str],
+) -> None:
+    """単一プロセスの実行 (キャッシュ判定 → run → 検証 → 登録)."""
+    for req in proc.requires:
+        ctx.get(req)
+
+    ck = compute_cache_key(proc, ctx)
+
+    if proc.produces:
+        cache_hit = _check_cache_static(proc, ck, ctx)
+    else:
+        cache_hit = _check_cache_dynamic(proc, ck, ctx)
+
+    if cache_hit and proc.name not in force:
+        return
+
+    produced = proc.run(ctx, exec_ctx)
+
+    if proc.produces:
+        produced_keys = set(produced.keys())
+        expected_keys = set(proc.produces)
+        if produced_keys != expected_keys:
+            missing = expected_keys - produced_keys
+            extra = produced_keys - expected_keys
+            parts = [f"Process '{proc.name}' produces mismatch:"]
+            if missing:
+                parts.append(f"missing={missing}")
+            if extra:
+                parts.append(f"unexpected={extra}")
+            raise RuntimeError(" ".join(parts))
+
+    for key, part in produced.items():
+        sha = sha256_file(part.path)
+        ctx.put(
+            Artifact(
+                key=key,
+                path=part.path,
+                format=part.format,
+                schema=part.schema,
+                producer=proc.name,
+                cache_key=ck,
+                sha256=sha,
+            )
+        )
+
+
 class Pipeline:
-    def __init__(self, processes: Sequence[ProcessBase]) -> None:
-        self.processes = list(processes)
-        names = [p.name for p in self.processes]
-        empty = [i for i, n in enumerate(names) if not n]
-        if empty:
-            raise ValueError(f"Process at index {empty} has empty name")
+    def __init__(self, steps: Sequence[Step]) -> None:
+        self._phases = _build_phases(steps)
+        self._validate_steps(steps)
+
+    def _validate_steps(self, steps: Sequence[Step]) -> None:
+        names: list[str] = []
+        for step in steps:
+            if isinstance(step, ProcessBase):
+                if not step.name:
+                    raise ValueError("Process has empty name")
+                names.append(step.name)
         if len(names) != len(set(names)):
             dupes = {n for n in names if names.count(n) > 1}
             raise ValueError(f"Duplicate process names: {dupes}")
@@ -185,67 +384,62 @@ class Pipeline:
         ctx: RunContext,
         exec_ctx: ExecContext,
         *,
-        from_process: str | None = None,
         force_processes: Sequence[str] | None = None,
     ) -> RunContext:
         force = set(force_processes or [])
-        all_names = {p.name for p in self.processes}
-        unknown = force - all_names
-        if unknown:
-            raise ValueError(f"Unknown force_processes: {unknown}")
 
-        start_idx = 0
-        if from_process is not None:
-            names = [p.name for p in self.processes]
-            if from_process not in names:
-                raise ValueError(f"Unknown from_process: {from_process}")
-            start_idx = names.index(from_process)
-
-        for i, proc in enumerate(self.processes):
-            if i < start_idx:
-                continue
-
-            for req in proc.requires:
-                ctx.get(req)
-
-            ck = compute_cache_key(proc, ctx)
-
-            cache_hit = True
-            for pk in proc.produces:
-                art = ctx.artifacts.get(pk)
-                if not art or art.cache_key != ck or not art.path.exists() or sha256_file(art.path) != art.sha256:
-                    cache_hit = False
-                    break
-
-            if cache_hit and proc.name not in force:
-                continue
-
-            produced = proc.run(ctx, exec_ctx)
-
-            produced_keys = set(produced.keys())
-            expected_keys = set(proc.produces)
-            if produced_keys != expected_keys:
-                missing = expected_keys - produced_keys
-                extra = produced_keys - expected_keys
-                parts = [f"Process '{proc.name}' produces mismatch:"]
-                if missing:
-                    parts.append(f"missing={missing}")
-                if extra:
-                    parts.append(f"unexpected={extra}")
-                raise RuntimeError(" ".join(parts))
-
-            for key, part in produced.items():
-                sha = sha256_file(part.path)
-                ctx.put(
-                    Artifact(
-                        key=key,
-                        path=part.path,
-                        format=part.format,
-                        schema=part.schema,
-                        producer=proc.name,
-                        cache_key=ck,
-                        sha256=sha,
-                    )
-                )
+        for phase in self._phases:
+            if isinstance(phase, _StaticPhase):
+                self._execute_static(phase.processes, ctx, exec_ctx, force)
+            elif isinstance(phase, _ChainPhase):
+                self._execute_chains(phase.maps, ctx, exec_ctx, force)
+            elif isinstance(phase, _ReducePhase):
+                proc = phase.reduce.expand(ctx)
+                self._execute_static([proc], ctx, exec_ctx, force)
 
         return ctx
+
+    def _execute_static(
+        self,
+        processes: list[ProcessBase],
+        ctx: RunContext,
+        exec_ctx: ExecContext,
+        force: set[str],
+    ) -> None:
+        for proc in processes:
+            _execute_one(proc, ctx, exec_ctx, force=force)
+
+    def _execute_chains(
+        self,
+        maps: list[Map],
+        ctx: RunContext,
+        exec_ctx: ExecContext,
+        force: set[str],
+    ) -> None:
+        variants = maps[0].discover_variants(ctx)
+        if not variants:
+            return
+
+        chains: dict[str, list[ProcessBase]] = {}
+        for variant in variants:
+            chains[variant] = [m.process_class(model_name=variant) for m in maps]  # type: ignore[call-arg]
+
+        def run_chain(variant: str, procs: list[ProcessBase]) -> None:
+            chain_temp = exec_ctx.temp_dir / variant
+            chain_temp.mkdir(parents=True, exist_ok=True)
+            chain_exec_ctx = ExecContext(
+                out_dir=exec_ctx.out_dir,
+                temp_dir=chain_temp,
+                logger=exec_ctx.logger,
+                env=exec_ctx.env,
+            )
+            for proc in procs:
+                _execute_one(proc, ctx, chain_exec_ctx, force=force)
+
+        with ThreadPoolExecutor() as pool:
+            futures = {
+                variant: pool.submit(run_chain, variant, procs)
+                for variant, procs in chains.items()
+            }
+            for variant, future in futures.items():
+                future.result()
