@@ -15,6 +15,7 @@ from processes import (
     RunModel,
 )
 from recipe import Recipe
+from toolchain import Toolchain
 
 
 class Args(argparse.Namespace):
@@ -77,6 +78,7 @@ def main() -> None:
 
     template_path = Path(args.recipe) if args.recipe else None
     recipe, recipe_path = _resolve_recipe(template_path, base_dir, logger)
+    toolchain = Toolchain(recipe.target.chip)
 
     env = DryRunEnvironment()
     ctx = RunContext.load(run_dir=run_dir)
@@ -96,9 +98,13 @@ def main() -> None:
         ),
         Map(CompileModel, kwargs_factory=lambda name: {
             **recipe.resolve_compile_options(name).model_dump(),
+            "compile_lib": toolchain.compile_lib,
+            "compile_flags": tuple(toolchain.compile_flags),
         }),
         Map(RunModel, kwargs_factory=lambda name: {
             **recipe.resolve_run_options(name).model_dump(),
+            "runtime_lib": toolchain.runtime_lib,
+            "runtime_flags": tuple(toolchain.runtime_flags),
         }),
         Map(FormatProfile),
         Reduce(AggregateProfile),

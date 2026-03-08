@@ -181,6 +181,43 @@ class TestCompileModel:
 
         assert len(dry_env.history) == 1
 
+    def test_chip_specific_lib_and_flags(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+        dry_env: DryRunEnvironment, put_artifact: Callable,
+    ) -> None:
+        """チップ固有のライブラリとフラグが CommandBuilder に渡される."""
+        model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
+
+        proc = CompileModel(
+            model_name="resnet",
+            optimization_level=2,
+            compile_lib="libChipY.so",
+            compile_flags=("--target=chipy", "--fp16"),
+        )
+        proc.run(run_ctx, exec_ctx)
+
+        assert ModelCompile(
+            model_path=model_path,
+            output=exec_ctx.out_dir / "resnet_compiled.cpp",
+            optimization_level=2,
+            compile_lib="libChipY.so",
+            compile_flags=("--target=chipy", "--fp16"),
+        ) in dry_env.history
+
+    def test_chip_specific_build_command(self) -> None:
+        """チップ固有パラメータがビルドコマンドに反映される."""
+        cmd = ModelCompile(
+            model_path=Path("model.onnx"),
+            output=Path("out.cpp"),
+            optimization_level=2,
+            compile_lib="libChipX.so",
+            compile_flags=("--target=chipx",),
+        )
+        argv = cmd.build()
+        assert "-l" in argv
+        assert "libChipX.so" in argv
+        assert "--target=chipx" in argv
+
 
 # ===========================================================================
 # Process C: RunModel
@@ -235,6 +272,43 @@ class TestRunModel:
     def test_requires_compiled_model(self) -> None:
         proc = RunModel(model_name="vgg")
         assert proc.requires == ["compiled_model.vgg"]
+
+    def test_chip_specific_lib_and_flags(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+        dry_env: DryRunEnvironment, put_artifact: Callable,
+    ) -> None:
+        """チップ固有のライブラリとフラグが RuntimeExec に渡される."""
+        compiled_path = put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
+
+        proc = RunModel(
+            model_name="resnet",
+            num_iterations=100,
+            runtime_lib="libChipYRuntime.so",
+            runtime_flags=("--device=chipy",),
+        )
+        proc.run(run_ctx, exec_ctx)
+
+        assert RuntimeExec(
+            compiled_path=compiled_path,
+            profile_output=exec_ctx.out_dir / "profile_resnet.json",
+            num_iterations=100,
+            runtime_lib="libChipYRuntime.so",
+            runtime_flags=("--device=chipy",),
+        ) in dry_env.history
+
+    def test_chip_specific_build_command(self) -> None:
+        """チップ固有パラメータがビルドコマンドに反映される."""
+        cmd = RuntimeExec(
+            compiled_path=Path("model.cpp"),
+            profile_output=Path("profile.json"),
+            num_iterations=100,
+            runtime_lib="libChipXRuntime.so",
+            runtime_flags=("--device=chipx",),
+        )
+        argv = cmd.build()
+        assert "-l" in argv
+        assert "libChipXRuntime.so" in argv
+        assert "--device=chipx" in argv
 
 
 # ===========================================================================

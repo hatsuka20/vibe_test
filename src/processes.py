@@ -33,14 +33,20 @@ class ModelCompile(CommandBuilder):
     model_path: Path
     output: Path
     optimization_level: int
+    compile_lib: str = ""
+    compile_flags: tuple[str, ...] = ()
 
     def build(self) -> list[str]:
-        return [
-            "model-compiler",
+        cmd = ["model-compiler"]
+        if self.compile_lib:
+            cmd += ["-l", self.compile_lib]
+        cmd += list(self.compile_flags)
+        cmd += [
             f"-O{self.optimization_level}",
             "-o", str(self.output),
             str(self.model_path),
         ]
+        return cmd
 
 
 @dataclass(frozen=True)
@@ -48,14 +54,20 @@ class RuntimeExec(CommandBuilder):
     compiled_path: Path
     profile_output: Path
     num_iterations: int
+    runtime_lib: str = ""
+    runtime_flags: tuple[str, ...] = ()
 
     def build(self) -> list[str]:
-        return [
-            "model-runtime",
+        cmd = ["model-runtime"]
+        if self.runtime_lib:
+            cmd += ["-l", self.runtime_lib]
+        cmd += list(self.runtime_flags)
+        cmd += [
             "--profile", str(self.profile_output),
             "--iterations", str(self.num_iterations),
             str(self.compiled_path),
         ]
+        return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +132,8 @@ class DownloadModel(ProcessBase):
 class CompileModel(ProcessBase):
     model_name: str = "default"
     optimization_level: int = 2
+    compile_lib: str = ""
+    compile_flags: tuple[str, ...] = ()
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
@@ -128,7 +142,11 @@ class CompileModel(ProcessBase):
         self.produces = [f"compiled_model.{self.model_name}"]
 
     def params(self) -> dict:
-        return {"optimization_level": self.optimization_level}
+        return {
+            "optimization_level": self.optimization_level,
+            "compile_lib": self.compile_lib,
+            "compile_flags": list(self.compile_flags),
+        }
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         model_art = ctx.get(f"model.{self.model_name}")
@@ -138,6 +156,8 @@ class CompileModel(ProcessBase):
             model_path=model_art.path,
             output=cpp_path,
             optimization_level=self.optimization_level,
+            compile_lib=self.compile_lib,
+            compile_flags=self.compile_flags,
         )
         exec_ctx.logger.info(
             "[B] モデルをコンパイル中: %s (O%d)", model_art.path, self.optimization_level,
@@ -175,6 +195,8 @@ namespace model {{
 class RunModel(ProcessBase):
     model_name: str = "default"
     num_iterations: int = 100
+    runtime_lib: str = ""
+    runtime_flags: tuple[str, ...] = ()
     version: str = "1.0.0"
 
     def __post_init__(self) -> None:
@@ -183,7 +205,11 @@ class RunModel(ProcessBase):
         self.produces = [f"profile.{self.model_name}"]
 
     def params(self) -> dict:
-        return {"num_iterations": self.num_iterations}
+        return {
+            "num_iterations": self.num_iterations,
+            "runtime_lib": self.runtime_lib,
+            "runtime_flags": list(self.runtime_flags),
+        }
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         compiled_art = ctx.get(f"compiled_model.{self.model_name}")
@@ -193,6 +219,8 @@ class RunModel(ProcessBase):
             compiled_path=compiled_art.path,
             profile_output=profile_path,
             num_iterations=self.num_iterations,
+            runtime_lib=self.runtime_lib,
+            runtime_flags=self.runtime_flags,
         )
         exec_ctx.logger.info(
             "[C] Runtime で実行中: %s (%d iterations)", compiled_art.path, self.num_iterations,
