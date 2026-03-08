@@ -19,28 +19,38 @@ from recipe import Recipe
 
 class Args(argparse.Namespace):
     experiment_name: str
-    recipe: str
+    recipe: str | None
 
 
-def _resolve_recipe(template_path: Path, base_dir: Path, logger: logging.Logger) -> tuple[Recipe, Path]:
+def _resolve_recipe(
+    template_path: Path | None, base_dir: Path, logger: logging.Logger,
+) -> tuple[Recipe, Path]:
     """experiment ディレクトリ内のレシピを解決する.
 
-    - experiment 内にレシピがあればそれを使う
-    - なければテンプレートからコピーして使う
+    - experiment 内にレシピがあればそれを使う (--recipe 不要)
+    - なければ --recipe で指定されたテンプレートからコピーして使う
     - --recipe が experiment 内のレシピ自身を指していればそのまま使う
+    - 既にレシピがある状態で --recipe を指定したらエラー
     """
     experiment_recipe_path = base_dir / "recipe.json5"
-    template_resolved = template_path.resolve()
-    experiment_resolved = experiment_recipe_path.resolve()
 
-    # --recipe が experiment 内のレシピ自身を指している場合
-    if template_resolved == experiment_resolved:
-        return Recipe.load(experiment_recipe_path), experiment_recipe_path
-
-    # experiment 内にレシピが既にある場合
     if experiment_recipe_path.exists():
+        if template_path is not None:
+            # --recipe が experiment 内のレシピ自身を指している場合は許容
+            if template_path.resolve() != experiment_recipe_path.resolve():
+                raise SystemExit(
+                    f"エラー: 既にレシピが存在します: {experiment_recipe_path}\n"
+                    "--recipe を指定せずに再実行してください。"
+                )
         logger.info("既存レシピを使用: %s", experiment_recipe_path)
         return Recipe.load(experiment_recipe_path), experiment_recipe_path
+
+    # experiment 内にレシピがない → --recipe 必須
+    if template_path is None:
+        raise SystemExit(
+            f"エラー: レシピが見つかりません: {experiment_recipe_path}\n"
+            "--recipe でテンプレートレシピのパスを指定してください。"
+        )
 
     # テンプレートからコピー
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -52,7 +62,7 @@ def _resolve_recipe(template_path: Path, base_dir: Path, logger: logging.Logger)
 def main() -> None:
     parser = argparse.ArgumentParser(description="モックパイプラインの実行")
     parser.add_argument("experiment_name", help="実験名 (experiments/<name> に出力)")
-    parser.add_argument("--recipe", default="recipes/recipe.json5", help="テンプレートレシピのパス")
+    parser.add_argument("--recipe", default=None, help="テンプレートレシピのパス (初回のみ必須)")
     args = parser.parse_args(namespace=Args())
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -65,7 +75,8 @@ def main() -> None:
     for d in (out_dir, temp_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    recipe, recipe_path = _resolve_recipe(Path(args.recipe), base_dir, logger)
+    template_path = Path(args.recipe) if args.recipe else None
+    recipe, recipe_path = _resolve_recipe(template_path, base_dir, logger)
 
     env = DryRunEnvironment()
     ctx = RunContext.load(run_dir=run_dir)
