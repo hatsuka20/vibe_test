@@ -786,3 +786,98 @@ class TestPipelineMapReduce:
         # variant ごとの一時ディレクトリが消えている
         assert not (exec_ctx.temp_dir / "a").exists()
         assert not (exec_ctx.temp_dir / "b").exists()
+
+    def test_partial_failure_continues(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """一部 variant が失敗しても他の variant は完走する."""
+
+        @dataclass
+        class FailOnA(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"fail_on_a_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"output.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                if self.model_name == "a":
+                    raise RuntimeError("Intentional failure for 'a'")
+                inp = ctx.get(f"input.{self.model_name}")
+                path = ectx.out_dir / f"output_{self.model_name}.dat"
+                path.write_bytes(inp.path.read_bytes() + b"_ok")
+                return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        pipeline = Pipeline([Map(FailOnA)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        # "a" は失敗 → artifact なし
+        assert "output.a" not in ctx.artifacts
+        # "b" は成功
+        assert "output.b" in ctx.artifacts
+        assert ctx.artifacts["output.b"].path.exists()
+
+    def test_partial_failure_reduce_uses_survivors(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """失敗した variant を除いて Reduce が実行される."""
+
+        @dataclass
+        class FailOnA(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"fail_on_a_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"output.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                if self.model_name == "a":
+                    raise RuntimeError("Intentional failure for 'a'")
+                inp = ctx.get(f"input.{self.model_name}")
+                path = ectx.out_dir / f"output_{self.model_name}.dat"
+                path.write_bytes(inp.path.read_bytes() + b"_ok")
+                return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        pipeline = Pipeline([Map(FailOnA), Reduce(ReducibleProcess)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        # Reduce は "b" のみで実行される
+        assert "summary" in ctx.artifacts
+        summary = ctx.artifacts["summary"].path.read_bytes()
+        assert b"b_ok" in summary
+        assert b"a" not in summary
+
+    def test_partial_failure_cleans_temp_dirs(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """失敗した variant の一時ディレクトリも削除される."""
+
+        @dataclass
+        class FailOnA(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"fail_on_a_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"output.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                if self.model_name == "a":
+                    raise RuntimeError("Intentional failure for 'a'")
+                path = ectx.out_dir / f"output_{self.model_name}.dat"
+                path.write_bytes(b"ok")
+                return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        pipeline = Pipeline([Map(FailOnA)])
+        pipeline.run(run_ctx, exec_ctx)
+
+        assert not (exec_ctx.temp_dir / "a").exists()
+        assert not (exec_ctx.temp_dir / "b").exists()

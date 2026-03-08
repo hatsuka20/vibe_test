@@ -456,21 +456,39 @@ class Pipeline:
                 env=_SandboxedEnvironment(exec_ctx.env, cwd=chain_temp),
             )
             for proc in procs:
-                _execute_one(
-                    proc, ctx, chain_exec_ctx,
-                    force=force, relocate_to=exec_ctx.out_dir,
-                )
+                try:
+                    _execute_one(
+                        proc, ctx, chain_exec_ctx,
+                        force=force, relocate_to=exec_ctx.out_dir,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Process '{proc.name}' failed in chain '{variant}'"
+                    ) from exc
 
+        errors: dict[str, Exception] = {}
         with ThreadPoolExecutor() as pool:
             futures = {
                 variant: pool.submit(run_chain, variant, procs)
                 for variant, procs in chains.items()
             }
             for variant, future in futures.items():
-                future.result()
+                try:
+                    future.result()
+                except Exception as exc:
+                    errors[variant] = exc
+                    exec_ctx.logger.warning(
+                        "Chain '%s' failed: %s", variant, exc,
+                    )
 
-        # 一時ディレクトリを削除
+        # 一時ディレクトリを削除 (成功・失敗問わず)
         for variant in variants:
             chain_temp = exec_ctx.temp_dir / variant
             if chain_temp.exists():
                 shutil.rmtree(chain_temp)
+
+        if errors:
+            exec_ctx.logger.warning(
+                "Partial failure: %d/%d variants failed: %s",
+                len(errors), len(variants), list(errors.keys()),
+            )
