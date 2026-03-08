@@ -27,7 +27,7 @@ class Recipe(BaseModel):
     compile_options: CompileOptions = Field(default_factory=CompileOptions)
     run_options: RunOptions = Field(default_factory=RunOptions)
     models: list[ModelConfig] = Field(default_factory=list)
-    confirmed: bool = False
+    confirmed: bool = True
 
     @classmethod
     def load(cls, path: Path) -> "Recipe":

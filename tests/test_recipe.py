@@ -137,16 +137,23 @@ class TestPopulateModels:
 
 
 class TestModelsConfirmed:
-    def test_not_confirmed_by_default(self) -> None:
-        assert Recipe().models_confirmed() is False
+    def test_confirmed_by_default(self) -> None:
+        """デフォルトは confirmed=True (他実装との互換性)."""
+        assert Recipe().models_confirmed() is True
 
-    def test_confirmed_when_flag_set(self) -> None:
-        recipe = Recipe(confirmed=True, models=[ModelConfig(name="resnet")])
+    def test_confirmed_with_models(self) -> None:
+        recipe = Recipe(models=[ModelConfig(name="resnet")])
         assert recipe.models_confirmed() is True
 
-    def test_not_confirmed_even_with_models(self) -> None:
-        """models があっても confirmed=False なら未確認."""
-        recipe = Recipe(models=[ModelConfig(name="resnet")])
+    def test_not_confirmed_when_explicitly_false(self) -> None:
+        """confirmed=False を明示した場合は未確認."""
+        recipe = Recipe(confirmed=False, models=[ModelConfig(name="resnet")])
+        assert recipe.models_confirmed() is False
+
+    def test_populate_resets_confirmed(self) -> None:
+        """populate_models で新モデルが追加されると confirmed=False になる."""
+        recipe = Recipe()
+        recipe.populate_models(["resnet"])
         assert recipe.models_confirmed() is False
 
 

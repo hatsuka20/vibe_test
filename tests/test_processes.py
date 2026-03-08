@@ -83,7 +83,7 @@ def put_artifact(
 # ===========================================================================
 class TestDownloadModel:
     def test_produces_model_files(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = DownloadModel(recipe=Recipe())
+        proc = DownloadModel(recipe=Recipe(confirmed=False))
         result = proc.run(run_ctx, exec_ctx)
 
         assert "model.resnet" in result
@@ -96,7 +96,7 @@ class TestDownloadModel:
     def test_invokes_curl_per_model(
         self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
     ) -> None:
-        recipe = Recipe(url_base="https://example.com/models")
+        recipe = Recipe(url_base="https://example.com/models", confirmed=False)
         proc = DownloadModel(recipe=recipe)
         proc.run(run_ctx, exec_ctx)
 
