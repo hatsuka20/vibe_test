@@ -388,6 +388,48 @@ class FormatProfile(ProcessBase):
 
 
 # ---------------------------------------------------------------------------
+# Process D2: ベースラインとの比較レポートを生成する (skip_if_missing の例)
+#   baseline.<name> がなければプロセスごとスキップされ、あれば比較結果を出力する
+# ---------------------------------------------------------------------------
+@dataclass
+class CompareBaseline(ProcessBase):
+    model_name: str = "default"
+    version: str = "1.0.0"
+    skip_if_missing: bool = True
+
+    def __post_init__(self) -> None:
+        self.name = f"compare_baseline_{self.model_name}"
+        self.requires = [f"profile.{self.model_name}", f"baseline.{self.model_name}"]
+        self.produces = [f"comparison.{self.model_name}"]
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        profile_art = ctx.get(f"profile.{self.model_name}")
+        baseline_art = ctx.get(f"baseline.{self.model_name}")
+
+        profile = json.loads(profile_art.path.read_text(encoding="utf-8"))
+        baseline = json.loads(baseline_art.path.read_text(encoding="utf-8"))
+
+        cur_lat = profile["latency_ms"]["mean"]
+        base_lat = baseline["latency_ms"]["mean"]
+        diff_pct = (cur_lat - base_lat) / base_lat * 100
+
+        lines = [
+            f"Baseline Comparison: {self.model_name}",
+            f"  baseline latency : {base_lat:.2f} ms",
+            f"  current  latency : {cur_lat:.2f} ms",
+            f"  diff             : {diff_pct:+.1f}%",
+        ]
+
+        comparison_path = exec_ctx.out_dir / f"comparison_{self.model_name}.txt"
+        comparison_path.write_text("\n".join(lines), encoding="utf-8")
+
+        exec_ctx.logger.info("[D2] ベースライン比較完了 -> %s (%+.1f%%)", comparison_path, diff_pct)
+        return {
+            f"comparison.{self.model_name}": ProducedArtifact(comparison_path, "txt", "comparison.v1"),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Process E: 全モデルのレポートを集約してサマリー比較テーブルを生成する
 # ---------------------------------------------------------------------------
 @dataclass

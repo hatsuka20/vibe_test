@@ -73,6 +73,10 @@ class RunContext:
                 raise KeyError(f"Missing artifact: {key}")
             return self.artifacts[key]
 
+    def has(self, key: str) -> bool:
+        with self._lock:
+            return key in self.artifacts
+
     def get_optional(self, key: str) -> Artifact | None:
         with self._lock:
             return self.artifacts.get(key)
@@ -153,6 +157,7 @@ class ProcessBase(ABC):
     requires: list[str] = field(default_factory=list)
     optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=list)
+    skip_if_missing: bool = False
 
     def params(self) -> dict[str, Any]:
         return {}
@@ -369,6 +374,11 @@ def _execute_one(
     Artifact のパスを移動先で登録する.
     """
     for req in proc.requires:
+        if proc.skip_if_missing and not ctx.has(req):
+            exec_ctx.logger.info(
+                "Skipping '%s': required artifact '%s' not found", proc.name, req,
+            )
+            return
         ctx.get(req)
 
     ck = compute_cache_key(proc, ctx)

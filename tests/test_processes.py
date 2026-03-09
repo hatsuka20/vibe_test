@@ -11,6 +11,7 @@ from environment import DryRunEnvironment
 from pipeline import Artifact, ExecContext, RunContext
 from processes import (
     AggregateProfile,
+    CompareBaseline,
     CompileModel,
     CurlDownload,
     DownloadModel,
@@ -457,6 +458,55 @@ class TestFormatProfile:
     def test_inherits_default_params(self) -> None:
         proc = FormatProfile()
         assert proc.params() == {}
+
+
+# ===========================================================================
+# Process D2: CompareBaseline (skip_if_missing)
+# ===========================================================================
+class TestCompareBaseline:
+    _PROFILE_DATA = {
+        "source": "model.cpp",
+        "iterations": 100,
+        "latency_ms": {"min": 1.0, "max": 5.0, "mean": 2.4, "p99": 4.0},
+        "throughput_items_per_sec": 400.0,
+        "memory_peak_mb": 100.0,
+        "ops": [],
+    }
+    _BASELINE_DATA = {
+        "source": "model.cpp",
+        "iterations": 100,
+        "latency_ms": {"min": 1.0, "max": 5.0, "mean": 3.0, "p99": 4.5},
+        "throughput_items_per_sec": 350.0,
+        "memory_peak_mb": 110.0,
+        "ops": [],
+    }
+
+    def test_produces_comparison_when_baseline_exists(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
+    ) -> None:
+        put_artifact(
+            "profile.resnet", "profile_resnet.json", "json", "profile.runtime.v1",
+            content=json.dumps(self._PROFILE_DATA).encode(),
+        )
+        put_artifact(
+            "baseline.resnet", "baseline_resnet.json", "json", "profile.runtime.v1",
+            content=json.dumps(self._BASELINE_DATA).encode(),
+        )
+
+        proc = CompareBaseline(model_name="resnet")
+        result = proc.run(run_ctx, exec_ctx)
+
+        assert "comparison.resnet" in result
+        content = result["comparison.resnet"].path.read_text(encoding="utf-8")
+        assert "Baseline Comparison: resnet" in content
+        assert "-20.0%" in content  # 3.0 → 2.4 = -20%
+
+    def test_process_fields(self) -> None:
+        proc = CompareBaseline(model_name="vgg")
+        assert proc.name == "compare_baseline_vgg"
+        assert proc.requires == ["profile.vgg", "baseline.vgg"]
+        assert proc.produces == ["comparison.vgg"]
+        assert proc.skip_if_missing is True
 
 
 # ===========================================================================

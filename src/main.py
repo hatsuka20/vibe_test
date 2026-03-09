@@ -9,6 +9,7 @@ from environment import DryRunEnvironment
 from pipeline import ExecContext, Gate, Map, Pipeline, PipelineHalted, Reduce, RunContext
 from processes import (
     AggregateProfile,
+    CompareBaseline,
     CompileModel,
     DownloadModel,
     FormatProfile,
@@ -114,6 +115,7 @@ def main() -> None:
             "runtime_flags": tuple(toolchain.runtime_flags),
         }),
         Map(FormatProfile),
+        Map(CompareBaseline),
         Reduce(AggregateProfile),
     ])
 

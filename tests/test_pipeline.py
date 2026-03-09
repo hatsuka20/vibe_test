@@ -883,6 +883,77 @@ class TestPipelineMapReduce:
 
 
 # ===========================================================================
+# Pipeline — skip_if_missing
+# ===========================================================================
+@dataclass
+class SkippableProcess(ProcessBase):
+    """skip_if_missing=True の Process."""
+
+    name: str = "skippable"
+    requires: list[str] = field(default_factory=lambda: ["maybe_missing"])
+    produces: list[str] = field(default_factory=lambda: ["skippable_out"])
+    version: str = "1.0.0"
+    skip_if_missing: bool = True
+
+    call_count: int = field(default=0, init=False, repr=False)
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        self.call_count += 1
+        path = exec_ctx.out_dir / "skippable.dat"
+        path.write_bytes(b"RAN")
+        return {"skippable_out": ProducedArtifact(path, "bin", "skip.v1")}
+
+
+class TestSkipIfMissing:
+    def test_skips_when_artifact_missing(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """requires のアーティファクトが無ければスキップされる."""
+        proc = SkippableProcess()
+        pipeline = Pipeline([proc])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert proc.call_count == 0
+        assert "skippable_out" not in ctx.artifacts
+
+    def test_runs_when_artifact_present(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """requires のアーティファクトがあれば通常通り実行される."""
+        p = tmp_path / "input.dat"
+        p.write_bytes(b"DATA")
+        run_ctx.put(Artifact(
+            key="maybe_missing", path=p, format="bin", schema="v1",
+            producer="test", cache_key="x", sha256=sha256_file(p),
+        ))
+
+        proc = SkippableProcess()
+        pipeline = Pipeline([proc])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert proc.call_count == 1
+        assert "skippable_out" in ctx.artifacts
+
+    def test_downstream_unaffected_by_skip(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """skip されたプロセスの後続は requires が満たされていれば実行される."""
+        pipeline = Pipeline([
+            StubProcess(),
+            SkippableProcess(),
+            DependentProcess(),  # requires=["out"] → StubProcess の出力
+        ])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "out" in ctx.artifacts
+        assert "skippable_out" not in ctx.artifacts
+        assert "derived" in ctx.artifacts
+
+    def test_skip_if_missing_false_raises_on_missing(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """skip_if_missing=False (デフォルト) ならアーティファクト不在で KeyError."""
+        proc = StubProcess(name="needs_input", requires=["nonexistent"])
+        pipeline = Pipeline([proc])
+        with pytest.raises(KeyError, match="Missing artifact"):
+            pipeline.run(run_ctx, exec_ctx)
+
+
+# ===========================================================================
 # Gate / PipelineHalted
 # ===========================================================================
 class TestGate:
