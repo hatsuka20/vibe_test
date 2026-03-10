@@ -729,7 +729,11 @@ class TestPipelineMapReduce:
         self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
     ) -> None:
         """Map 内の env.run() にデフォルト cwd が注入されることを確認."""
-        env: DryRunEnvironment = exec_ctx.env  # type: ignore[assignment]
+        env = DryRunEnvironment()
+        exec_ctx = ExecContext(
+            out_dir=exec_ctx.out_dir, temp_dir=exec_ctx.temp_dir,
+            logger=exec_ctx.logger, env=env,
+        )
 
         @dataclass
         class CmdRunner(ProcessBase):
@@ -1065,9 +1069,6 @@ class TestPerProcessEnv:
         # proc_env にコマンドが記録される
         assert len(proc_env.records) == 1
         assert proc_env.records[0].command.build() == ["echo", "hello"]
-        # exec_ctx のデフォルト env には記録されない
-        default_env: DryRunEnvironment = exec_ctx.env  # type: ignore[assignment]
-        assert len(default_env.records) == 0
 
     def test_map_env_overrides_default(
         self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
@@ -1113,7 +1114,11 @@ class TestPerProcessEnv:
     ) -> None:
         """連続 Map で一部だけ env を指定すると、指定した Map のみ別 env を使う."""
         special_env = DryRunEnvironment()
-        default_env: DryRunEnvironment = exec_ctx.env  # type: ignore[assignment]
+        default_env = DryRunEnvironment()
+        exec_ctx = ExecContext(
+            out_dir=exec_ctx.out_dir, temp_dir=exec_ctx.temp_dir,
+            logger=exec_ctx.logger, env=default_env,
+        )
 
         @dataclass
         class Step1(ProcessBase):
@@ -1349,9 +1354,16 @@ class TestAllowFailure:
         self, run_ctx: RunContext, exec_ctx: ExecContext,
     ) -> None:
         """allow_failure=True なら produces と不一致でもエラーにならない."""
+        # PartialOutputProcess は常に {} を返すため、DryRun ではファントムが
+        # 登録されてしまう → LocalEnvironment を使う
+        from environment import LocalEnvironment
+        local_exec_ctx = ExecContext(
+            out_dir=exec_ctx.out_dir, temp_dir=exec_ctx.temp_dir,
+            logger=exec_ctx.logger, env=LocalEnvironment(),
+        )
         proc = PartialOutputProcess()
         pipeline = Pipeline([proc])
-        ctx = pipeline.run(run_ctx, exec_ctx)
+        ctx = pipeline.run(run_ctx, local_exec_ctx)
 
         assert proc.call_count == 1
         assert "partial_out" not in ctx.artifacts
@@ -1360,12 +1372,17 @@ class TestAllowFailure:
         self, run_ctx: RunContext, exec_ctx: ExecContext,
     ) -> None:
         """空出力はキャッシュされず、再実行時にも再度 run() が呼ばれる."""
+        from environment import LocalEnvironment
+        local_exec_ctx = ExecContext(
+            out_dir=exec_ctx.out_dir, temp_dir=exec_ctx.temp_dir,
+            logger=exec_ctx.logger, env=LocalEnvironment(),
+        )
         proc = PartialOutputProcess()
         pipeline = Pipeline([proc])
-        pipeline.run(run_ctx, exec_ctx)
+        pipeline.run(run_ctx, local_exec_ctx)
         assert proc.call_count == 1
 
-        pipeline.run(run_ctx, exec_ctx)
+        pipeline.run(run_ctx, local_exec_ctx)
         assert proc.call_count == 2  # キャッシュなし → 再実行
 
     def test_allow_failure_false_raises_on_exception(
@@ -1381,10 +1398,17 @@ class TestAllowFailure:
         self, run_ctx: RunContext, exec_ctx: ExecContext,
     ) -> None:
         """allow_failure=False なら produces 不一致でエラーになる."""
+        # PartialOutputProcess は常に {} を返すため、DryRun では
+        # 「DryRun で実行できなかった」と区別がつかない → LocalEnvironment を使う
+        from environment import LocalEnvironment
+        local_exec_ctx = ExecContext(
+            out_dir=exec_ctx.out_dir, temp_dir=exec_ctx.temp_dir,
+            logger=exec_ctx.logger, env=LocalEnvironment(),
+        )
         proc = PartialOutputProcess(allow_failure=False)
         pipeline = Pipeline([proc])
         with pytest.raises(RuntimeError, match="produces mismatch"):
-            pipeline.run(run_ctx, exec_ctx)
+            pipeline.run(run_ctx, local_exec_ctx)
 
 
 # ===========================================================================

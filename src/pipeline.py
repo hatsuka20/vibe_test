@@ -401,6 +401,9 @@ def _check_cache_dynamic(proc: ProcessBase, ck: str, ctx: RunContext) -> bool:
     )
 
 
+_DRY_RUN_SHA256 = "dry-run"
+
+
 def _execute_one(
     proc: ProcessBase,
     ctx: RunContext,
@@ -452,7 +455,9 @@ def _execute_one(
             return
         raise
 
-    if proc.produces and not proc.allow_failure:
+    dry = not exec_ctx.env.executes
+
+    if not (dry and not produced) and proc.produces and not proc.allow_failure:
         produced_keys = set(produced.keys())
         expected_keys = set(proc.produces)
         if produced_keys != expected_keys:
@@ -467,11 +472,11 @@ def _execute_one(
 
     for key, part in produced.items():
         final_path = part.path
-        if relocate_to is not None:
+        if relocate_to is not None and final_path.exists():
             final_path = relocate_to / part.path.name
             final_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(part.path), str(final_path))
-        sha = sha256_path(final_path)
+        sha = sha256_path(final_path) if final_path.exists() else _DRY_RUN_SHA256
         ctx.put(
             Artifact(
                 key=key,
@@ -483,6 +488,19 @@ def _execute_one(
                 sha256=sha,
             )
         )
+
+    # DryRun: produces 宣言があるが returned されなかったキーにファントムを登録
+    phantom_keys = set(proc.produces) - set(produced.keys()) if dry else set()
+    for key in phantom_keys:
+        ctx.put(Artifact(
+            key=key,
+            path=exec_ctx.out_dir / key,
+            format="phantom",
+            schema="phantom",
+            producer=proc.name,
+            cache_key=ck,
+            sha256=_DRY_RUN_SHA256,
+        ))
 
 
 class Pipeline:

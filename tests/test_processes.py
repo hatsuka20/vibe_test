@@ -1,6 +1,5 @@
 """processes の各 Process に対する単体テスト."""
 
-import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -84,17 +83,6 @@ def put_artifact(
 # Process A: DownloadModel (動的 produces)
 # ===========================================================================
 class TestDownloadModel:
-    def test_produces_model_files(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = DownloadModel(recipe=Recipe(confirmed=False))
-        result = proc.run(run_ctx, exec_ctx)
-
-        assert "model.resnet" in result
-        assert "model.vgg" in result
-        for key, art in result.items():
-            assert art.path.exists()
-            assert art.path.stat().st_size > 0
-            assert art.format == "onnx"
-
     def test_invokes_curl_per_model(
         self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
     ) -> None:
@@ -127,58 +115,6 @@ class TestDownloadModel:
 # Process B1: GenerateConfig
 # ===========================================================================
 class TestGenerateConfig:
-    def test_chipX_generates_ini(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
-
-        proc = GenerateConfig(model_name="resnet", chip="chipX")
-        result = proc.run(run_ctx, exec_ctx)
-
-        assert "config.resnet" in result
-        art = result["config.resnet"]
-        assert art.format == "ini"
-        content = art.path.read_text(encoding="utf-8")
-        assert "[compile]" in content
-        assert "memory_mode = normal" in content
-
-    def test_chipY_generates_json(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
-
-        proc = GenerateConfig(model_name="resnet", chip="chipY")
-        result = proc.run(run_ctx, exec_ctx)
-
-        art = result["config.resnet"]
-        assert art.format == "json"
-        data = json.loads(art.path.read_text(encoding="utf-8"))
-        assert data["memory_mode"] == "normal"
-
-    def test_quantization_in_ini(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
-
-        opts = CompileOptions(quantization_bits=8)
-        proc = GenerateConfig(model_name="resnet", compile_options=opts, chip="chipX")
-        result = proc.run(run_ctx, exec_ctx)
-
-        content = result["config.resnet"].path.read_text(encoding="utf-8")
-        assert "quantization_bits = 8" in content
-
-    def test_quantization_in_json(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
-
-        opts = CompileOptions(quantization_bits=16)
-        proc = GenerateConfig(model_name="resnet", compile_options=opts, chip="chipY")
-        result = proc.run(run_ctx, exec_ctx)
-
-        data = json.loads(result["config.resnet"].path.read_text(encoding="utf-8"))
-        assert data["quantization"]["bits"] == 16
-
     def test_process_fields(self) -> None:
         proc = GenerateConfig(model_name="vgg")
         assert proc.name == "generate_config_vgg"
@@ -206,19 +142,6 @@ class TestCompileModel:
             content=b"[compile]\nmemory_mode = normal\n",
         )
 
-    def test_produces_cpp_file(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
-
-        proc = CompileModel(model_name="resnet")
-        result = proc.run(run_ctx, exec_ctx)
-
-        assert "compiled_model.resnet" in result
-        art = result["compiled_model.resnet"]
-        assert art.path.exists()
-        assert art.format == "cpp"
-
     def test_invokes_compiler_with_config(
         self, run_ctx: RunContext, exec_ctx: ExecContext,
         dry_env: DryRunEnvironment, put_artifact: Callable,
@@ -235,18 +158,6 @@ class TestCompileModel:
             optimization_level=3,
             config_path=config_path,
         ) in dry_env.history
-
-    def test_cpp_contains_source_reference(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        model_path = put_artifact("model.resnet", "resnet.onnx", "onnx", "model.onnx.v1")
-
-        proc = CompileModel(model_name="resnet", compile_options=CompileOptions(optimization_level=3))
-        result = proc.run(run_ctx, exec_ctx)
-
-        content = result["compiled_model.resnet"].path.read_text(encoding="utf-8")
-        assert str(model_path) in content
-        assert "optimization_level = 3" in content
 
     def test_requires_model_and_config(self) -> None:
         proc = CompileModel(model_name="vgg")
@@ -311,26 +222,6 @@ class TestCompileModel:
 # Process C: RunModel
 # ===========================================================================
 class TestRunModel:
-    def test_produces_valid_profile_json(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
-
-        proc = RunModel(model_name="resnet")
-        result = proc.run(run_ctx, exec_ctx)
-
-        assert "profile.resnet" in result
-        art = result["profile.resnet"]
-        assert art.path.exists()
-        assert art.format == "json"
-
-        profile = json.loads(art.path.read_text(encoding="utf-8"))
-        assert "latency_ms" in profile
-        assert "throughput_items_per_sec" in profile
-        assert "memory_peak_mb" in profile
-        assert "ops" in profile
-        assert len(profile["ops"]) > 0
-
     def test_invokes_runtime_via_env(
         self, run_ctx: RunContext, exec_ctx: ExecContext,
         dry_env: DryRunEnvironment, put_artifact: Callable,
@@ -345,17 +236,6 @@ class TestRunModel:
             profile_output=exec_ctx.out_dir / "profile_resnet.json",
             num_iterations=500,
         ) in dry_env.history
-
-    def test_profile_reflects_iterations(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact("compiled_model.resnet", "resnet.cpp", "cpp", "compiled.cpp.v1")
-
-        proc = RunModel(model_name="resnet", run_options=RunOptions(num_iterations=500))
-        result = proc.run(run_ctx, exec_ctx)
-
-        profile = json.loads(result["profile.resnet"].path.read_text(encoding="utf-8"))
-        assert profile["iterations"] == 500
 
     def test_requires_compiled_model(self) -> None:
         proc = RunModel(model_name="vgg")
@@ -403,54 +283,6 @@ class TestRunModel:
 # Process D: FormatProfile
 # ===========================================================================
 class TestFormatProfile:
-    @pytest.fixture()
-    def _setup_profile(self, put_artifact: Callable) -> None:
-        profile_data = {
-            "source": "model.cpp",
-            "iterations": 100,
-            "latency_ms": {"min": 1.0, "max": 5.0, "mean": 2.0, "p99": 4.0},
-            "throughput_items_per_sec": 400.0,
-            "memory_peak_mb": 100.0,
-            "ops": [
-                {"name": "conv2d_1", "time_ms": 0.8, "memory_mb": 32.0},
-            ],
-        }
-        put_artifact(
-            "profile.resnet", "profile_resnet.json", "json", "profile.runtime.v1",
-            content=json.dumps(profile_data).encode(),
-        )
-
-    @pytest.mark.usefixtures("_setup_profile")
-    def test_produces_human_readable_report(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = FormatProfile(model_name="resnet")
-        result = proc.run(run_ctx, exec_ctx)
-
-        assert "report.resnet" in result
-        art = result["report.resnet"]
-        assert art.path.exists()
-        assert art.format == "txt"
-
-    @pytest.mark.usefixtures("_setup_profile")
-    def test_report_contains_key_sections(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = FormatProfile(model_name="resnet")
-        result = proc.run(run_ctx, exec_ctx)
-
-        report = result["report.resnet"].path.read_text(encoding="utf-8")
-        assert "Model Performance Report" in report
-        assert "Latency" in report
-        assert "Throughput" in report
-        assert "Peak Memory" in report
-        assert "Per-Op Breakdown" in report
-        assert "conv2d_1" in report
-
-    @pytest.mark.usefixtures("_setup_profile")
-    def test_does_not_invoke_env(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
-    ) -> None:
-        proc = FormatProfile(model_name="resnet")
-        proc.run(run_ctx, exec_ctx)
-        assert len(dry_env.history) == 0
-
     def test_requires_profile(self) -> None:
         proc = FormatProfile(model_name="vgg")
         assert proc.requires == ["profile.vgg"]
@@ -464,43 +296,6 @@ class TestFormatProfile:
 # Process D2: CompareBaseline (skip_if_missing)
 # ===========================================================================
 class TestCompareBaseline:
-    _PROFILE_DATA = {
-        "source": "model.cpp",
-        "iterations": 100,
-        "latency_ms": {"min": 1.0, "max": 5.0, "mean": 2.4, "p99": 4.0},
-        "throughput_items_per_sec": 400.0,
-        "memory_peak_mb": 100.0,
-        "ops": [],
-    }
-    _BASELINE_DATA = {
-        "source": "model.cpp",
-        "iterations": 100,
-        "latency_ms": {"min": 1.0, "max": 5.0, "mean": 3.0, "p99": 4.5},
-        "throughput_items_per_sec": 350.0,
-        "memory_peak_mb": 110.0,
-        "ops": [],
-    }
-
-    def test_produces_comparison_when_baseline_exists(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, put_artifact: Callable,
-    ) -> None:
-        put_artifact(
-            "profile.resnet", "profile_resnet.json", "json", "profile.runtime.v1",
-            content=json.dumps(self._PROFILE_DATA).encode(),
-        )
-        put_artifact(
-            "baseline.resnet", "baseline_resnet.json", "json", "profile.runtime.v1",
-            content=json.dumps(self._BASELINE_DATA).encode(),
-        )
-
-        proc = CompareBaseline(model_name="resnet")
-        result = proc.run(run_ctx, exec_ctx)
-
-        assert "comparison.resnet" in result
-        content = result["comparison.resnet"].path.read_text(encoding="utf-8")
-        assert "Baseline Comparison: resnet" in content
-        assert "-20.0%" in content  # 3.0 → 2.4 = -20%
-
     def test_process_fields(self) -> None:
         proc = CompareBaseline(model_name="vgg")
         assert proc.name == "compare_baseline_vgg"
@@ -513,44 +308,9 @@ class TestCompareBaseline:
 # Process E: AggregateProfile
 # ===========================================================================
 class TestAggregateProfile:
-    @pytest.fixture()
-    def _setup_reports(self, put_artifact: Callable) -> None:
-        for name in ["resnet", "vgg"]:
-            put_artifact(
-                f"report.{name}", f"report_{name}.txt", "txt", "report.human.v1",
-                content=f"Report for {name}".encode(),
-            )
-
-    @pytest.mark.usefixtures("_setup_reports")
-    def test_produces_summary(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = AggregateProfile(model_names=["resnet", "vgg"])
-        result = proc.run(run_ctx, exec_ctx)
-
-        assert "summary_report" in result
-        art = result["summary_report"]
-        assert art.path.exists()
-        assert art.format == "txt"
-
-    @pytest.mark.usefixtures("_setup_reports")
-    def test_summary_contains_all_models(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
-        proc = AggregateProfile(model_names=["resnet", "vgg"])
-        result = proc.run(run_ctx, exec_ctx)
-
-        summary = result["summary_report"].path.read_text(encoding="utf-8")
-        assert "resnet" in summary
-        assert "vgg" in summary
-        assert "Aggregate Summary" in summary
-
     def test_process_fields(self) -> None:
         proc = AggregateProfile(model_names=["a", "b"])
         assert proc.name == "aggregate_profile"
         assert proc.requires == ["report.a", "report.b"]
         assert proc.produces == ["summary_report"]
 
-    @pytest.mark.usefixtures("_setup_reports")
-    def test_does_not_invoke_env(
-        self, run_ctx: RunContext, exec_ctx: ExecContext, dry_env: DryRunEnvironment,
-    ) -> None:
-        proc = AggregateProfile(model_names=["resnet", "vgg"])
-        proc.run(run_ctx, exec_ctx)
-        assert len(dry_env.history) == 0

@@ -114,7 +114,8 @@ class DownloadModel(ProcessBase):
             exec_ctx.env.run(cmd)
 
             # mock: 実コマンドの代わりにダミーファイルを生成
-            model_path.write_bytes(b"\x00MOCK_" + name.encode() + b"_WEIGHTS" * 64)
+            if exec_ctx.env.executes:
+                model_path.write_bytes(b"\x00MOCK_" + name.encode() + b"_WEIGHTS" * 64)
 
             exec_ctx.logger.info("[A] ダウンロード完了 -> %s", model_path)
             result[f"model.{name}"] = ProducedArtifact(model_path, "onnx", "model.onnx.v1")
@@ -189,7 +190,8 @@ class GenerateConfig(ProcessBase):
             ext = "json"
 
         config_path = exec_ctx.out_path(f"{self.model_name}_config.{ext}")
-        config_path.write_text(content, encoding="utf-8")
+        if exec_ctx.env.executes:
+            config_path.write_text(content, encoding="utf-8")
 
         exec_ctx.logger.info("[B1] config 生成完了 -> %s (%s形式)", config_path, fmt)
         return {
@@ -243,7 +245,8 @@ class CompileModel(ProcessBase):
         exec_ctx.env.run(cmd, cwd=exec_ctx.temp_dir)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
-        cpp_content = f"""\
+        if exec_ctx.env.executes:
+            cpp_content = f"""\
 // Auto-generated from {model_art.path}
 // config = {config_art.path}
 // optimization_level = {self.compile_options.optimization_level}
@@ -259,7 +262,7 @@ namespace model {{
   }}
 }}
 """
-        cpp_path.write_text(cpp_content, encoding="utf-8")
+            cpp_path.write_text(cpp_content, encoding="utf-8")
 
         exec_ctx.logger.info("[B2] コンパイル完了 -> %s", cpp_path)
         return {
@@ -310,20 +313,21 @@ class RunModel(ProcessBase):
         exec_ctx.env.run(cmd)
 
         # mock: 実コマンドの代わりにダミーファイルを生成
-        profile_data = {
-            "source": str(compiled_art.path),
-            "iterations": self.run_options.num_iterations,
-            "latency_ms": {"min": 1.2, "max": 5.8, "mean": 2.4, "p99": 4.9},
-            "throughput_items_per_sec": 416.7,
-            "memory_peak_mb": 128.5,
-            "ops": [
-                {"name": "conv2d_1", "time_ms": 0.8, "memory_mb": 32.0},
-                {"name": "relu_1", "time_ms": 0.1, "memory_mb": 0.5},
-                {"name": "pool_1", "time_ms": 0.3, "memory_mb": 8.0},
-                {"name": "fc_1", "time_ms": 0.5, "memory_mb": 16.0},
-            ],
-        }
-        profile_path.write_text(json.dumps(profile_data, indent=2), encoding="utf-8")
+        if exec_ctx.env.executes:
+            profile_data = {
+                "source": str(compiled_art.path),
+                "iterations": self.run_options.num_iterations,
+                "latency_ms": {"min": 1.2, "max": 5.8, "mean": 2.4, "p99": 4.9},
+                "throughput_items_per_sec": 416.7,
+                "memory_peak_mb": 128.5,
+                "ops": [
+                    {"name": "conv2d_1", "time_ms": 0.8, "memory_mb": 32.0},
+                    {"name": "relu_1", "time_ms": 0.1, "memory_mb": 0.5},
+                    {"name": "pool_1", "time_ms": 0.3, "memory_mb": 8.0},
+                    {"name": "fc_1", "time_ms": 0.5, "memory_mb": 16.0},
+                ],
+            }
+            profile_path.write_text(json.dumps(profile_data, indent=2), encoding="utf-8")
 
         exec_ctx.logger.info("[C] 実行完了 -> %s", profile_path)
         return {
@@ -346,6 +350,10 @@ class FormatProfile(ProcessBase):
         self.produces = [f"report.{self.model_name}"]
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        if not exec_ctx.env.executes:
+            exec_ctx.logger.info("[D] DryRun時はskip: %s", self.model_name)
+            return {}
+
         profile_art = ctx.get(f"profile.{self.model_name}")
         exec_ctx.logger.info("[D] プロファイルを整形中: %s", profile_art.path)
 
@@ -403,6 +411,10 @@ class CompareBaseline(ProcessBase):
         self.produces = [f"comparison.{self.model_name}"]
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        if not exec_ctx.env.executes:
+            exec_ctx.logger.info("[D2] DryRun時はskip: %s", self.model_name)
+            return {}
+
         profile_art = ctx.get(f"profile.{self.model_name}")
         baseline_art = ctx.get(f"baseline.{self.model_name}")
 
@@ -443,6 +455,10 @@ class AggregateProfile(ProcessBase):
         self.produces = ["summary_report"]
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        if not exec_ctx.env.executes:
+            exec_ctx.logger.info("[E] DryRun時はskip: %s", self.model_names)
+            return {}
+
         exec_ctx.logger.info("[E] レポートを集約中: %s", self.model_names)
 
         # 各モデルの profile を読み取り (report ではなく profile から数値取得)

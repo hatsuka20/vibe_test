@@ -5,7 +5,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from environment import DryRunEnvironment
+from environment import LocalEnvironment, DryRunEnvironment
 from pipeline import ExecContext, Gate, Map, Pipeline, PipelineHalted, Reduce, RunContext
 from processes import (
     AggregateProfile,
