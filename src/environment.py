@@ -35,6 +35,11 @@ class CommandBuilder(ABC):
 
 
 class Environment(ABC):
+    @property
+    def executes(self) -> bool:
+        """コマンドを実際に実行するかどうか."""
+        return True
+
     @abstractmethod
     def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult: ...
 
@@ -88,6 +93,10 @@ class DryRunRecord:
 
 class DryRunEnvironment(Environment):
     """コマンドを記録するだけで実行しない. テストや検証用."""
+
+    @property
+    def executes(self) -> bool:
+        return False
 
     def __init__(self) -> None:
         self.records: list[DryRunRecord] = []

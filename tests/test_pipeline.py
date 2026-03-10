@@ -1385,3 +1385,26 @@ class TestAllowFailure:
         pipeline = Pipeline([proc])
         with pytest.raises(RuntimeError, match="produces mismatch"):
             pipeline.run(run_ctx, exec_ctx)
+
+
+# ===========================================================================
+# Environment.executes
+# ===========================================================================
+class TestEnvironmentExecutes:
+    def test_dry_run_does_not_execute(self) -> None:
+        env = DryRunEnvironment()
+        assert env.executes is False
+
+    def test_default_executes(self) -> None:
+        """Environment のデフォルトは True."""
+        from environment import LocalEnvironment
+        env = LocalEnvironment()
+        assert env.executes is True
+
+    def test_sandboxed_delegates_to_inner(self, tmp_path: Path) -> None:
+        """_SandboxedEnvironment は inner の executes を返す."""
+        from pipeline import _SandboxedEnvironment
+
+        dry = DryRunEnvironment()
+        sandboxed = _SandboxedEnvironment(dry, cwd=tmp_path)
+        assert sandboxed.executes is False

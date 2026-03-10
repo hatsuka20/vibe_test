@@ -137,6 +137,10 @@ class _SandboxedEnvironment(Environment):
         self._inner = inner
         self._cwd = cwd
 
+    @property
+    def executes(self) -> bool:
+        return self._inner.executes
+
     def run(self, command: CommandBuilder, *, cwd: Path | None = None) -> CommandResult:
         return self._inner.run(command, cwd=cwd or self._cwd)
 
