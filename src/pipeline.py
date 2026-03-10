@@ -404,19 +404,52 @@ def _check_cache_dynamic(proc: ProcessBase, ck: str, ctx: RunContext) -> bool:
 _DRY_RUN_SHA256 = "dry-run"
 
 
+def _relocate_tree(src: Path, dst: Path, ctx: RunContext) -> None:
+    """src 配下の全ファイル/ディレクトリを dst へ移動し、ctx 内の Artifact パスを更新する.
+
+    同名ディレクトリが dst に既存の場合は中身をマージする (shutil.copytree + 削除).
+    """
+    for child in list(src.iterdir()):
+        target = dst / child.name
+        if child.is_dir():
+            if target.exists():
+                # ディレクトリ衝突: copytree でマージ後にソースを削除
+                shutil.copytree(child, target, dirs_exist_ok=True)
+                shutil.rmtree(child)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(child), str(target))
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(child), str(target))
+
+    # RunContext 内の Artifact パスを src → dst に書き換え
+    with ctx._lock:
+        for key, art in list(ctx.artifacts.items()):
+            try:
+                rel = art.path.relative_to(src)
+            except ValueError:
+                continue
+            ctx.artifacts[key] = Artifact(
+                key=art.key,
+                path=dst / rel,
+                format=art.format,
+                schema=art.schema,
+                producer=art.producer,
+                cache_key=art.cache_key,
+                sha256=art.sha256,
+                meta=art.meta,
+            )
+
+
 def _execute_one(
     proc: ProcessBase,
     ctx: RunContext,
     exec_ctx: ExecContext,
     *,
     force: set[str],
-    relocate_to: Path | None = None,
 ) -> None:
-    """単一プロセスの実行 (キャッシュ判定 → run → 検証 → 登録).
-
-    relocate_to が指定された場合、生成ファイルをそのディレクトリに移動し
-    Artifact のパスを移動先で登録する.
-    """
+    """単一プロセスの実行 (キャッシュ判定 → run → 検証 → 登録)."""
     for req in proc.requires:
         if proc.skip_if_missing and not ctx.has(req):
             exec_ctx.logger.info(
@@ -472,10 +505,6 @@ def _execute_one(
 
     for key, part in produced.items():
         final_path = part.path
-        if relocate_to is not None and final_path.exists():
-            final_path = relocate_to / part.path.name
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(part.path), str(final_path))
         sha = sha256_path(final_path) if final_path.exists() else _DRY_RUN_SHA256
         ctx.put(
             Artifact(
@@ -574,24 +603,27 @@ class Pipeline:
             chains[variant] = procs
 
         def run_chain(variant: str, procs: list[ProcessBase]) -> None:
-            chain_temp = exec_ctx.temp_dir / variant
-            chain_temp.mkdir(parents=True, exist_ok=True)
+            chain_dir = exec_ctx.temp_dir / variant
+            chain_out = chain_dir / "out"
+            chain_tmp = chain_dir / "tmp"
+            chain_out.mkdir(parents=True, exist_ok=True)
+            chain_tmp.mkdir(parents=True, exist_ok=True)
             chain_exec_ctx = ExecContext(
-                out_dir=chain_temp,
-                temp_dir=chain_temp,
+                out_dir=chain_out,
+                temp_dir=chain_tmp,
                 logger=exec_ctx.logger,
-                env=_SandboxedEnvironment(exec_ctx.env, cwd=chain_temp),
+                env=_SandboxedEnvironment(exec_ctx.env, cwd=chain_tmp),
             )
             for proc in procs:
                 try:
-                    _execute_one(
-                        proc, ctx, chain_exec_ctx,
-                        force=force, relocate_to=exec_ctx.out_dir,
-                    )
+                    _execute_one(proc, ctx, chain_exec_ctx, force=force)
                 except Exception as exc:
                     raise RuntimeError(
                         f"Process '{proc.name}' failed in chain '{variant}'"
                     ) from exc
+
+            # chain_out の中身を exec_ctx.out_dir へ一括移動
+            _relocate_tree(chain_out, exec_ctx.out_dir, ctx)
 
         errors: dict[str, Exception] = {}
         with ThreadPoolExecutor() as pool:
@@ -610,9 +642,9 @@ class Pipeline:
 
         # 一時ディレクトリを削除 (成功・失敗問わず)
         for variant in variants:
-            chain_temp = exec_ctx.temp_dir / variant
-            if chain_temp.exists():
-                shutil.rmtree(chain_temp)
+            chain_dir = exec_ctx.temp_dir / variant
+            if chain_dir.exists():
+                shutil.rmtree(chain_dir)
 
         if errors:
             exec_ctx.logger.warning(

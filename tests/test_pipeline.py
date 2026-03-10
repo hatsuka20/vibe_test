@@ -762,7 +762,7 @@ class TestPipelineMapReduce:
 
         # DryRunEnvironment.records で cwd を直接確認
         assert len(env.records) == 1
-        assert env.records[0].cwd == exec_ctx.temp_dir / "a"
+        assert env.records[0].cwd == exec_ctx.temp_dir / "a" / "tmp"
 
     def test_artifacts_relocated_to_out_dir(
         self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
@@ -777,6 +777,40 @@ class TestPipelineMapReduce:
             art = ctx.artifacts[f"output.{name}"]
             assert art.path.parent == exec_ctx.out_dir
             assert art.path.exists()
+
+    def test_artifacts_in_subdirs_relocated_correctly(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """Map プロセスがサブディレクトリに出力した場合もパス構造が保持されることを確認."""
+
+        @dataclass
+        class SubdirProcess(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"subdir_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"subdir_out.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                # サブディレクトリ内にファイルを生成
+                sub = ectx.out_dir / "reports" / self.model_name
+                sub.mkdir(parents=True, exist_ok=True)
+                path = sub / "result.txt"
+                path.write_bytes(f"result_{self.model_name}".encode())
+                return {f"subdir_out.{self.model_name}": ProducedArtifact(sub, "dir", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        pipeline = Pipeline([Map(SubdirProcess)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        for name in ["a", "b"]:
+            art = ctx.artifacts[f"subdir_out.{name}"]
+            # サブディレクトリ構造が out_dir/reports/<name> に保持されている
+            assert art.path == exec_ctx.out_dir / "reports" / name
+            assert art.path.is_dir()
+            assert (art.path / "result.txt").read_bytes() == f"result_{name}".encode()
 
     def test_temp_dirs_cleaned_up(
         self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
