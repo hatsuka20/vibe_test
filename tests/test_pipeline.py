@@ -23,6 +23,7 @@ from pipeline import (
     RunContext,
     compute_cache_key,
     sha256_file,
+    sha256_path,
 )
 
 
@@ -1169,3 +1170,128 @@ class TestPerProcessEnv:
         # Step2 は special_env
         assert len(special_env.records) == 1
         assert special_env.records[0].command.build() == ["step2"]
+
+
+# ===========================================================================
+# sha256_path — ファイル / ディレクトリ 両対応
+# ===========================================================================
+class TestSha256Path:
+    def test_file_matches_sha256_file(self, tmp_path: Path) -> None:
+        """単一ファイルの場合、sha256_file と同じ結果を返す."""
+        f = tmp_path / "a.txt"
+        f.write_bytes(b"hello")
+        assert sha256_path(f) == sha256_file(f)
+
+    def test_directory_hash(self, tmp_path: Path) -> None:
+        """ディレクトリのハッシュが計算できる."""
+        d = tmp_path / "dir"
+        d.mkdir()
+        (d / "a.txt").write_bytes(b"AAA")
+        (d / "b.txt").write_bytes(b"BBB")
+        h = sha256_path(d)
+        assert isinstance(h, str) and len(h) == 64
+
+    def test_directory_hash_deterministic(self, tmp_path: Path) -> None:
+        """同じ内容のディレクトリは同じハッシュを返す."""
+        d = tmp_path / "dir"
+        d.mkdir()
+        (d / "x.txt").write_bytes(b"X")
+        (d / "y.txt").write_bytes(b"Y")
+        assert sha256_path(d) == sha256_path(d)
+
+    def test_directory_content_change_changes_hash(self, tmp_path: Path) -> None:
+        """ファイル内容が変わるとハッシュが変わる."""
+        d = tmp_path / "dir"
+        d.mkdir()
+        (d / "a.txt").write_bytes(b"V1")
+        h1 = sha256_path(d)
+        (d / "a.txt").write_bytes(b"V2")
+        h2 = sha256_path(d)
+        assert h1 != h2
+
+    def test_directory_file_added_changes_hash(self, tmp_path: Path) -> None:
+        """ファイルが追加されるとハッシュが変わる."""
+        d = tmp_path / "dir"
+        d.mkdir()
+        (d / "a.txt").write_bytes(b"A")
+        h1 = sha256_path(d)
+        (d / "b.txt").write_bytes(b"B")
+        h2 = sha256_path(d)
+        assert h1 != h2
+
+    def test_directory_nested(self, tmp_path: Path) -> None:
+        """ネストされたディレクトリも走査される."""
+        d = tmp_path / "dir"
+        (d / "sub").mkdir(parents=True)
+        (d / "top.txt").write_bytes(b"TOP")
+        (d / "sub" / "inner.txt").write_bytes(b"INNER")
+        h = sha256_path(d)
+        assert isinstance(h, str) and len(h) == 64
+
+    def test_empty_directory(self, tmp_path: Path) -> None:
+        """空ディレクトリでもハッシュが計算できる."""
+        d = tmp_path / "empty"
+        d.mkdir()
+        h = sha256_path(d)
+        assert isinstance(h, str) and len(h) == 64
+
+
+# ===========================================================================
+# Pipeline — ディレクトリ Artifact
+# ===========================================================================
+@dataclass
+class DirProducerProcess(ProcessBase):
+    """ディレクトリを生成物とする Process."""
+
+    name: str = "dir_producer"
+    produces: list[str] = field(default_factory=lambda: ["dir_out"])
+    version: str = "1.0.0"
+
+    call_count: int = field(default=0, init=False, repr=False)
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        self.call_count += 1
+        d = exec_ctx.out_dir / "output_dir"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a.txt").write_bytes(b"AAA")
+        (d / "b.txt").write_bytes(b"BBB")
+        return {"dir_out": ProducedArtifact(d, "directory", "dir.v1")}
+
+
+class TestDirectoryArtifact:
+    def test_directory_artifact_registered(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """ディレクトリを生成物として登録できる."""
+        pipeline = Pipeline([DirProducerProcess()])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "dir_out" in ctx.artifacts
+        art = ctx.artifacts["dir_out"]
+        assert art.path.is_dir()
+        assert art.format == "directory"
+        assert len(art.sha256) == 64
+
+    def test_directory_artifact_cache_hit(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """ディレクトリ Artifact もキャッシュが効く."""
+        proc = DirProducerProcess()
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1  # キャッシュヒット
+
+    def test_directory_artifact_cache_invalidated_on_change(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """ディレクトリ内のファイルが変更されるとキャッシュが無効化される."""
+        proc = DirProducerProcess()
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        # ディレクトリ内のファイルを書き換え
+        art = run_ctx.artifacts["dir_out"]
+        (art.path / "a.txt").write_bytes(b"CHANGED")
+
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 2  # キャッシュミス → 再実行

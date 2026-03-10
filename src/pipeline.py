@@ -25,6 +25,24 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def sha256_path(path: Path) -> str:
+    """ファイルまたはディレクトリのハッシュを計算する.
+
+    ディレクトリの場合は全ファイルを相対パスのソート順で走査し、
+    (相対パス, ファイル内容) のペアからハッシュを計算する.
+    """
+    if path.is_file():
+        return sha256_file(path)
+    h = hashlib.sha256()
+    for child in sorted(path.rglob("*")):
+        if child.is_file():
+            h.update(str(child.relative_to(path)).encode())
+            with child.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+    return h.hexdigest()
+
+
 def json_dump(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -362,7 +380,7 @@ def _check_cache_static(proc: ProcessBase, ck: str, ctx: RunContext) -> bool:
     """静的 produces のキャッシュ判定."""
     for pk in proc.produces:
         art = ctx.artifacts.get(pk)
-        if not art or art.cache_key != ck or not art.path.exists() or sha256_file(art.path) != art.sha256:
+        if not art or art.cache_key != ck or not art.path.exists() or sha256_path(art.path) != art.sha256:
             return False
     return True
 
@@ -373,7 +391,7 @@ def _check_cache_dynamic(proc: ProcessBase, ck: str, ctx: RunContext) -> bool:
     if not prev:
         return False
     return all(
-        a.cache_key == ck and a.path.exists() and sha256_file(a.path) == a.sha256
+        a.cache_key == ck and a.path.exists() and sha256_path(a.path) == a.sha256
         for a in prev
     )
 
@@ -439,7 +457,7 @@ def _execute_one(
             final_path = relocate_to / part.path.name
             final_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(part.path), str(final_path))
-        sha = sha256_file(final_path)
+        sha = sha256_path(final_path)
         ctx.put(
             Artifact(
                 key=key,
