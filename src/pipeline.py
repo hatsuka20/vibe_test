@@ -188,6 +188,7 @@ class ProcessBase(ABC):
     optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=list)
     skip_if_missing: bool = False
+    allow_failure: bool = False
     env: Environment | None = field(default=None, repr=False)
 
     def params(self) -> dict[str, Any]:
@@ -436,9 +437,18 @@ def _execute_one(
     if cache_hit and proc.name not in force:
         return
 
-    produced = proc.run(ctx, exec_ctx)
+    try:
+        produced = proc.run(ctx, exec_ctx)
+    except Exception:
+        if proc.allow_failure:
+            exec_ctx.logger.warning(
+                "Process '%s' failed (allow_failure=True), continuing", proc.name,
+                exc_info=True,
+            )
+            return
+        raise
 
-    if proc.produces:
+    if proc.produces and not proc.allow_failure:
         produced_keys = set(produced.keys())
         expected_keys = set(proc.produces)
         if produced_keys != expected_keys:

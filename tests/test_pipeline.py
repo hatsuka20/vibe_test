@@ -1295,3 +1295,93 @@ class TestDirectoryArtifact:
 
         pipeline.run(run_ctx, exec_ctx)
         assert proc.call_count == 2  # キャッシュミス → 再実行
+
+
+# ===========================================================================
+# Pipeline — allow_failure
+# ===========================================================================
+@dataclass
+class FailingProcess(ProcessBase):
+    """常に例外を送出する Process."""
+
+    name: str = "failing"
+    produces: list[str] = field(default_factory=lambda: ["fail_out"])
+    version: str = "1.0.0"
+    allow_failure: bool = True
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        raise RuntimeError("Intentional failure")
+
+
+@dataclass
+class PartialOutputProcess(ProcessBase):
+    """produces を宣言するが空 dict を返す Process."""
+
+    name: str = "partial"
+    produces: list[str] = field(default_factory=lambda: ["partial_out"])
+    version: str = "1.0.0"
+    allow_failure: bool = True
+
+    call_count: int = field(default=0, init=False, repr=False)
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        self.call_count += 1
+        return {}
+
+
+class TestAllowFailure:
+    def test_exception_caught_and_pipeline_continues(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """allow_failure=True なら例外を送出してもパイプラインが続行する."""
+        pipeline = Pipeline([
+            StubProcess(),
+            FailingProcess(),
+            DependentProcess(),  # requires=["out"] → StubProcess の出力
+        ])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "out" in ctx.artifacts
+        assert "fail_out" not in ctx.artifacts
+        assert "derived" in ctx.artifacts
+
+    def test_partial_output_accepted(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """allow_failure=True なら produces と不一致でもエラーにならない."""
+        proc = PartialOutputProcess()
+        pipeline = Pipeline([proc])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert proc.call_count == 1
+        assert "partial_out" not in ctx.artifacts
+
+    def test_partial_output_no_cache(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """空出力はキャッシュされず、再実行時にも再度 run() が呼ばれる."""
+        proc = PartialOutputProcess()
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 2  # キャッシュなし → 再実行
+
+    def test_allow_failure_false_raises_on_exception(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """allow_failure=False (デフォルト) なら例外は伝播する."""
+        proc = FailingProcess(allow_failure=False)
+        pipeline = Pipeline([proc])
+        with pytest.raises(RuntimeError, match="Intentional failure"):
+            pipeline.run(run_ctx, exec_ctx)
+
+    def test_allow_failure_false_raises_on_mismatch(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """allow_failure=False なら produces 不一致でエラーになる."""
+        proc = PartialOutputProcess(allow_failure=False)
+        pipeline = Pipeline([proc])
+        with pytest.raises(RuntimeError, match="produces mismatch"):
+            pipeline.run(run_ctx, exec_ctx)
