@@ -170,6 +170,7 @@ class ProcessBase(ABC):
     optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=list)
     skip_if_missing: bool = False
+    env: Environment | None = field(default=None, repr=False)
 
     def params(self) -> dict[str, Any]:
         return {}
@@ -240,6 +241,7 @@ class Map:
     key_prefix: str = ""
     kwargs: dict[str, Any] = field(default_factory=dict)
     kwargs_factory: Any = None  # Callable[[str], dict] | None
+    env: Environment | None = None
 
     def _resolve_kwargs(self, variant: str) -> dict[str, Any]:
         base = dict(self.kwargs)
@@ -258,7 +260,11 @@ class Map:
 
     def expand(self, ctx: RunContext) -> list[ProcessBase]:
         variants = self.discover_variants(ctx)
-        return [self.process_class(model_name=v, **self._resolve_kwargs(v)) for v in variants]  # type: ignore[call-arg]
+        procs = [self.process_class(model_name=v, **self._resolve_kwargs(v)) for v in variants]  # type: ignore[call-arg]
+        if self.env is not None:
+            for p in procs:
+                p.env = self.env
+        return procs
 
 
 @dataclass(frozen=True)
@@ -393,6 +399,15 @@ def _execute_one(
             return
         ctx.get(req)
 
+    # プロセス固有の Environment がある場合は ExecContext を差し替え
+    if proc.env is not None:
+        exec_ctx = ExecContext(
+            out_dir=exec_ctx.out_dir,
+            temp_dir=exec_ctx.temp_dir,
+            logger=exec_ctx.logger,
+            env=proc.env,
+        )
+
     ck = compute_cache_key(proc, ctx)
 
     if proc.produces:
@@ -500,7 +515,13 @@ class Pipeline:
 
         chains: dict[str, list[ProcessBase]] = {}
         for variant in variants:
-            chains[variant] = [m.process_class(model_name=variant, **m._resolve_kwargs(variant)) for m in maps]  # type: ignore[call-arg]
+            procs: list[ProcessBase] = []
+            for m in maps:
+                p = m.process_class(model_name=variant, **m._resolve_kwargs(variant))  # type: ignore[call-arg]
+                if m.env is not None:
+                    p.env = m.env
+                procs.append(p)
+            chains[variant] = procs
 
         def run_chain(variant: str, procs: list[ProcessBase]) -> None:
             chain_temp = exec_ctx.temp_dir / variant

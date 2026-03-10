@@ -1028,3 +1028,144 @@ class TestGate:
         ctx = pipeline.run(run_ctx, exec_ctx)
         assert "out" in ctx.artifacts
         assert "output.a" in ctx.artifacts
+
+
+# ===========================================================================
+# Pipeline — per-process Environment
+# ===========================================================================
+class TestPerProcessEnv:
+    def test_static_process_uses_own_env(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """ProcessBase.env が設定されていれば、そちらが使用される."""
+        proc_env = DryRunEnvironment()
+
+        @dataclass
+        class EnvProcess(ProcessBase):
+            name: str = "env_proc"
+            produces: list[str] = field(default_factory=lambda: ["env_out"])
+            version: str = "1.0.0"
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                @dataclass(frozen=True)
+                class Noop(CommandBuilder):
+                    def build(self) -> list[str]:
+                        return ["echo", "hello"]
+
+                ectx.env.run(Noop())
+                path = ectx.out_path("env_out.dat")
+                path.write_bytes(b"ENV")
+                return {"env_out": ProducedArtifact(path, "bin", "v1")}
+
+        proc = EnvProcess(env=proc_env)
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+
+        # proc_env にコマンドが記録される
+        assert len(proc_env.records) == 1
+        assert proc_env.records[0].command.build() == ["echo", "hello"]
+        # exec_ctx のデフォルト env には記録されない
+        default_env: DryRunEnvironment = exec_ctx.env  # type: ignore[assignment]
+        assert len(default_env.records) == 0
+
+    def test_map_env_overrides_default(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """Map.env が設定されていれば、その Map のプロセスはそちらの env を使う."""
+        map_env = DryRunEnvironment()
+
+        @dataclass
+        class CmdMappable(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"cmd_map_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"output.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                @dataclass(frozen=True)
+                class Noop(CommandBuilder):
+                    def build(self) -> list[str]:
+                        return ["run", self.model_name]
+
+                    model_name: str = "default"
+
+                ectx.env.run(Noop(model_name=self.model_name))
+                path = ectx.out_path(f"output_{self.model_name}.dat")
+                path.write_bytes(b"OK")
+                return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        pipeline = Pipeline([Map(CmdMappable, env=map_env)])
+        pipeline.run(run_ctx, exec_ctx)
+
+        # map_env に 2 variant 分のコマンドが記録される
+        assert len(map_env.records) == 2
+        cmds = {tuple(r.command.build()) for r in map_env.records}
+        assert ("run", "a") in cmds
+        assert ("run", "b") in cmds
+
+    def test_mixed_chain_env(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """連続 Map で一部だけ env を指定すると、指定した Map のみ別 env を使う."""
+        special_env = DryRunEnvironment()
+        default_env: DryRunEnvironment = exec_ctx.env  # type: ignore[assignment]
+
+        @dataclass
+        class Step1(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"step1_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"mid.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                @dataclass(frozen=True)
+                class Cmd1(CommandBuilder):
+                    def build(self) -> list[str]:
+                        return ["step1"]
+
+                ectx.env.run(Cmd1())
+                path = ectx.out_path(f"mid_{self.model_name}.dat")
+                path.write_bytes(b"MID")
+                return {f"mid.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        @dataclass
+        class Step2(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"step2_{self.model_name}"
+                self.requires = [f"mid.{self.model_name}"]
+                self.produces = [f"output.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                @dataclass(frozen=True)
+                class Cmd2(CommandBuilder):
+                    def build(self) -> list[str]:
+                        return ["step2"]
+
+                ectx.env.run(Cmd2())
+                path = ectx.out_path(f"output_{self.model_name}.dat")
+                path.write_bytes(b"OUT")
+                return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a"])
+        pipeline = Pipeline([
+            Map(Step1),                      # デフォルト env
+            Map(Step2, env=special_env),     # 専用 env
+        ])
+        pipeline.run(run_ctx, exec_ctx)
+
+        # Step1 はデフォルト env (SandboxedEnvironment 経由で default_env に記録)
+        assert len(default_env.records) == 1
+        assert default_env.records[0].command.build() == ["step1"]
+        # Step2 は special_env
+        assert len(special_env.records) == 1
+        assert special_env.records[0].command.build() == ["step2"]
