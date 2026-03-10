@@ -45,7 +45,7 @@ class StubProcess(ProcessBase):
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         self.call_count += 1
-        path = exec_ctx.out_dir / f"{self.name}.dat"
+        path = exec_ctx.out_path(f"{self.name}.dat")
         path.write_bytes(self.content)
         return {"out": ProducedArtifact(path, "bin", "stub.v1")}
 
@@ -59,8 +59,8 @@ class TwoOutputProcess(ProcessBase):
     version: str = "1.0.0"
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        pa = exec_ctx.out_dir / "a.dat"
-        pb = exec_ctx.out_dir / "b.dat"
+        pa = exec_ctx.out_path("a.dat")
+        pb = exec_ctx.out_path("b.dat")
         pa.write_bytes(b"A")
         pb.write_bytes(b"B")
         return {
@@ -78,7 +78,7 @@ class BadProcess(ProcessBase):
     version: str = "1.0.0"
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        path = exec_ctx.out_dir / "wrong.dat"
+        path = exec_ctx.out_path("wrong.dat")
         path.write_bytes(b"X")
         return {"wrong_key": ProducedArtifact(path, "bin", "bad.v1")}
 
@@ -95,7 +95,7 @@ class DependentProcess(ProcessBase):
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         prev = ctx.get("out")
         data = prev.path.read_bytes()
-        path = exec_ctx.out_dir / "derived.dat"
+        path = exec_ctx.out_path("derived.dat")
         path.write_bytes(data + b"_derived")
         return {"derived": ProducedArtifact(path, "bin", "derived.v1")}
 
@@ -120,7 +120,7 @@ class MappableProcess(ProcessBase):
         self.call_count += 1
         inp = ctx.get(f"input.{self.model_name}")
         data = inp.path.read_bytes()
-        path = exec_ctx.out_dir / f"output_{self.model_name}.dat"
+        path = exec_ctx.out_path(f"output_{self.model_name}.dat")
         path.write_bytes(data + b"_mapped")
         return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "output.v1")}
 
@@ -140,7 +140,7 @@ class SecondMappable(ProcessBase):
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         inp = ctx.get(f"output.{self.model_name}")
         data = inp.path.read_bytes()
-        path = exec_ctx.out_dir / f"final_{self.model_name}.dat"
+        path = exec_ctx.out_path(f"final_{self.model_name}.dat")
         path.write_bytes(data + b"_final")
         return {f"final.{self.model_name}": ProducedArtifact(path, "bin", "final.v1")}
 
@@ -161,7 +161,7 @@ class ReducibleProcess(ProcessBase):
         parts = []
         for m in self.model_names:
             parts.append(ctx.get(f"output.{m}").path.read_bytes())
-        path = exec_ctx.out_dir / "summary.dat"
+        path = exec_ctx.out_path("summary.dat")
         path.write_bytes(b"|".join(parts))
         return {"summary": ProducedArtifact(path, "bin", "summary.v1")}
 
@@ -182,7 +182,7 @@ class DynamicProducesProcess(ProcessBase):
         self.call_count += 1
         result = {}
         for name in ["x", "y"]:
-            path = exec_ctx.out_dir / f"{name}.dat"
+            path = exec_ctx.out_path(f"{name}.dat")
             path.write_bytes(name.encode())
             result[f"dyn.{name}"] = ProducedArtifact(path, "bin", "dyn.v1")
         return result
@@ -407,7 +407,7 @@ class OptionalProcess(ProcessBase):
     version: str = "1.0.0"
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
-        path = exec_ctx.out_dir / "out.dat"
+        path = exec_ctx.out_path("out.dat")
         path.write_bytes(b"OPT")
         return {"out": ProducedArtifact(path, "bin", "opt.v1")}
 
@@ -713,7 +713,7 @@ class TestPipelineMapReduce:
 
             def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
                 observed_temp_dirs.append(ectx.temp_dir)
-                path = ectx.out_dir / f"rec_{self.model_name}.dat"
+                path = ectx.out_path(f"rec_{self.model_name}.dat")
                 path.write_bytes(b"R")
                 return {f"rec_out.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
 
@@ -747,7 +747,7 @@ class TestPipelineMapReduce:
                         return ["echo", "test"]
 
                 ectx.env.run(Noop())
-                path = ectx.out_dir / f"cmd_{self.model_name}.dat"
+                path = ectx.out_path(f"cmd_{self.model_name}.dat")
                 path.write_bytes(b"C")
                 return {f"cmd_out.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
 
@@ -805,7 +805,7 @@ class TestPipelineMapReduce:
                 if self.model_name == "a":
                     raise RuntimeError("Intentional failure for 'a'")
                 inp = ctx.get(f"input.{self.model_name}")
-                path = ectx.out_dir / f"output_{self.model_name}.dat"
+                path = ectx.out_path(f"output_{self.model_name}.dat")
                 path.write_bytes(inp.path.read_bytes() + b"_ok")
                 return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
 
@@ -838,7 +838,7 @@ class TestPipelineMapReduce:
                 if self.model_name == "a":
                     raise RuntimeError("Intentional failure for 'a'")
                 inp = ctx.get(f"input.{self.model_name}")
-                path = ectx.out_dir / f"output_{self.model_name}.dat"
+                path = ectx.out_path(f"output_{self.model_name}.dat")
                 path.write_bytes(inp.path.read_bytes() + b"_ok")
                 return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
 
@@ -870,7 +870,7 @@ class TestPipelineMapReduce:
             def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
                 if self.model_name == "a":
                     raise RuntimeError("Intentional failure for 'a'")
-                path = ectx.out_dir / f"output_{self.model_name}.dat"
+                path = ectx.out_path(f"output_{self.model_name}.dat")
                 path.write_bytes(b"ok")
                 return {f"output.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
 
@@ -899,7 +899,7 @@ class SkippableProcess(ProcessBase):
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         self.call_count += 1
-        path = exec_ctx.out_dir / "skippable.dat"
+        path = exec_ctx.out_path("skippable.dat")
         path.write_bytes(b"RAN")
         return {"skippable_out": ProducedArtifact(path, "bin", "skip.v1")}
 

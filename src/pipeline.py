@@ -130,6 +130,18 @@ class ExecContext:
     logger: logging.Logger
     env: Environment = field(default_factory=LocalEnvironment)
 
+    def out_path(self, filename: str) -> Path:
+        """out_dir 配下のパスを返す (親ディレクトリ作成保証付き)."""
+        p = self.out_dir / filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def temp_path(self, filename: str) -> Path:
+        """temp_dir 配下のパスを返す (親ディレクトリ作成保証付き)."""
+        p = self.temp_dir / filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
 
 @dataclass(frozen=True)
 class ProducedArtifact:

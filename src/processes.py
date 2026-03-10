@@ -108,7 +108,7 @@ class DownloadModel(ProcessBase):
         url_base = self.recipe.url_base
         result = {}
         for name in model_names:
-            model_path = exec_ctx.out_dir / f"{name}.onnx"
+            model_path = exec_ctx.out_path(f"{name}.onnx")
             cmd = CurlDownload(url=f"{url_base}/{name}.onnx", output=model_path)
             exec_ctx.logger.info("[A] モデルをダウンロード中: %s", cmd.url)
             exec_ctx.env.run(cmd)
@@ -188,7 +188,7 @@ class GenerateConfig(ProcessBase):
             content = self._generate_json()
             ext = "json"
 
-        config_path = exec_ctx.out_dir / f"{self.model_name}_config.{ext}"
+        config_path = exec_ctx.out_path(f"{self.model_name}_config.{ext}")
         config_path.write_text(content, encoding="utf-8")
 
         exec_ctx.logger.info("[B1] config 生成完了 -> %s (%s形式)", config_path, fmt)
@@ -225,7 +225,7 @@ class CompileModel(ProcessBase):
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         model_art = ctx.get(f"model.{self.model_name}")
         config_art = ctx.get(f"config.{self.model_name}")
-        cpp_path = exec_ctx.out_dir / f"{self.model_name}_compiled.cpp"
+        cpp_path = exec_ctx.out_path(f"{self.model_name}_compiled.cpp")
 
         cmd = ModelCompile(
             model_path=model_art.path,
@@ -294,7 +294,7 @@ class RunModel(ProcessBase):
 
     def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
         compiled_art = ctx.get(f"compiled_model.{self.model_name}")
-        profile_path = exec_ctx.out_dir / f"profile_{self.model_name}.json"
+        profile_path = exec_ctx.out_path(f"profile_{self.model_name}.json")
 
         cmd = RuntimeExec(
             compiled_path=compiled_art.path,
@@ -378,7 +378,7 @@ class FormatProfile(ProcessBase):
             lines.append(f"  {op['name']:<16} {op['time_ms']:>10.2f} {op['memory_mb']:>12.1f}")
         lines += ["  " + "-" * 46, "=" * 60, ""]
 
-        report_path = exec_ctx.out_dir / f"report_{self.model_name}.txt"
+        report_path = exec_ctx.out_path(f"report_{self.model_name}.txt")
         report_path.write_text("\n".join(lines), encoding="utf-8")
 
         exec_ctx.logger.info("[D] レポート生成完了 -> %s", report_path)
@@ -420,7 +420,7 @@ class CompareBaseline(ProcessBase):
             f"  diff             : {diff_pct:+.1f}%",
         ]
 
-        comparison_path = exec_ctx.out_dir / f"comparison_{self.model_name}.txt"
+        comparison_path = exec_ctx.out_path(f"comparison_{self.model_name}.txt")
         comparison_path.write_text("\n".join(lines), encoding="utf-8")
 
         exec_ctx.logger.info("[D2] ベースライン比較完了 -> %s (%+.1f%%)", comparison_path, diff_pct)
@@ -467,7 +467,7 @@ class AggregateProfile(ProcessBase):
             lines.append("")
         lines.append("=" * 60)
 
-        summary_path = exec_ctx.out_dir / "summary_report.txt"
+        summary_path = exec_ctx.out_path("summary_report.txt")
         summary_path.write_text("\n".join(lines), encoding="utf-8")
 
         exec_ctx.logger.info("[E] 集約完了 -> %s", summary_path)
