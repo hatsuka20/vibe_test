@@ -492,7 +492,7 @@ class TestMap:
             )
 
         m = Map(MappableProcess)
-        procs = m.expand(run_ctx)
+        procs = m.instantiate(run_ctx)
         assert len(procs) == 2
         names = {p.name for p in procs}
         assert names == {"mappable_a", "mappable_b"}
@@ -519,7 +519,7 @@ class TestMap:
 
         m = Map(NoSentinel)
         with pytest.raises(ValueError, match="Cannot infer key_prefix"):
-            m.expand(run_ctx)
+            m.instantiate(run_ctx)
 
     def test_kwargs_factory_applied_per_variant(self, run_ctx: RunContext, tmp_path: Path) -> None:
         """kwargs_factory が variant ごとに異なるパラメータで Process を生成する."""
@@ -547,7 +547,7 @@ class TestMap:
             )
 
         m = Map(ParamProcess, kwargs_factory=lambda v: {"extra": v.upper()})
-        procs = m.expand(run_ctx)
+        procs = m.instantiate(run_ctx)
 
         by_name = {p.model_name: p for p in procs}
         assert by_name["a"].extra == "A"
@@ -583,10 +583,152 @@ class TestMap:
             kwargs={"static": 1},
             kwargs_factory=lambda v: {"dynamic": v},
         )
-        procs = m.expand(run_ctx)
+        procs = m.instantiate(run_ctx)
         assert len(procs) == 1
         assert procs[0].static == 1
         assert procs[0].dynamic == "x"
+
+
+# ===========================================================================
+# Map — expand パラメータ
+# ===========================================================================
+class TestMapExpand:
+    def test_expand_custom_field(self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path) -> None:
+        """expand で model_name 以外のフィールドを指定できる."""
+
+        @dataclass
+        class ConfigProcess(ProcessBase):
+            config_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"cfg_{self.config_name}"
+                self.requires = [f"settings.{self.config_name}"]
+                self.produces = [f"result.{self.config_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                path = ectx.out_path(f"result_{self.config_name}.dat")
+                path.write_bytes(self.config_name.encode())
+                return {f"result.{self.config_name}": ProducedArtifact(path, "bin", "v1")}
+
+        # settings.fast, settings.slow を seed
+        for name in ["fast", "slow"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(name.encode())
+            run_ctx.put(Artifact(
+                key=f"settings.{name}", path=p, format="bin", schema="v1",
+                producer="seed", cache_key="seed", sha256=sha256_file(p),
+            ))
+
+        pipeline = Pipeline([Map(ConfigProcess, expand="config_name")])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "result.fast" in ctx.artifacts
+        assert "result.slow" in ctx.artifacts
+        assert ctx.artifacts["result.fast"].path.read_bytes() == b"fast"
+
+    def test_expand_instantiate(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """instantiate() が expand フィールドを使ってインスタンスを生成する."""
+
+        @dataclass
+        class ByRegion(ProcessBase):
+            region: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"by_{self.region}"
+                self.requires = [f"data.{self.region}"]
+                self.produces = [f"out.{self.region}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                return {}
+
+        for name in ["us", "eu"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"data.{name}"] = Artifact(
+                key=f"data.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        m = Map(ByRegion, expand="region")
+        procs = m.instantiate(run_ctx)
+        assert len(procs) == 2
+        regions = {p.region for p in procs}
+        assert regions == {"us", "eu"}
+
+    def test_expand_with_explicit_prefix(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """expand + key_prefix の組み合わせ."""
+
+        @dataclass
+        class ByDevice(ProcessBase):
+            device: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"dev_{self.device}"
+                self.requires = [f"hw.{self.device}"]
+                self.produces = [f"out.{self.device}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                return {}
+
+        for name in ["gpu", "cpu"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(b"X")
+            run_ctx.artifacts[f"custom.{name}"] = Artifact(
+                key=f"custom.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        m = Map(ByDevice, expand="device", key_prefix="custom")
+        procs = m.instantiate(run_ctx)
+        assert {p.device for p in procs} == {"gpu", "cpu"}
+
+    def test_chained_maps_different_expand(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """異なる expand を持つ Map をチェーンできる."""
+
+        @dataclass
+        class Step1(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"s1_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"mid.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                path = ectx.out_path(f"mid_{self.model_name}.dat")
+                path.write_bytes(b"MID")
+                return {f"mid.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        @dataclass
+        class Step2(ProcessBase):
+            variant: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"s2_{self.variant}"
+                self.requires = [f"mid.{self.variant}"]
+                self.produces = [f"final.{self.variant}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                path = ectx.out_path(f"final_{self.variant}.dat")
+                path.write_bytes(b"FINAL")
+                return {f"final.{self.variant}": ProducedArtifact(path, "bin", "v1")}
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        pipeline = Pipeline([
+            Map(Step1),                        # expand="model_name" (default)
+            Map(Step2, expand="variant"),       # expand="variant"
+        ])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "final.a" in ctx.artifacts
+        assert "final.b" in ctx.artifacts
 
 
 # ===========================================================================
@@ -622,7 +764,7 @@ class TestReduce:
 
         r = Reduce(NoSentinelReduce)
         with pytest.raises(ValueError, match="Cannot infer key_prefix"):
-            r.expand(run_ctx)
+            r.instantiate(run_ctx)
 
     def test_expand(self, run_ctx: RunContext, tmp_path: Path) -> None:
         for name in ["a", "b"]:
@@ -634,7 +776,7 @@ class TestReduce:
             )
 
         r = Reduce(ReducibleProcess)
-        proc = r.expand(run_ctx)
+        proc = r.instantiate(run_ctx)
         assert proc.name == "reducer"
         assert set(proc.requires) == {"output.a", "output.b"}
 

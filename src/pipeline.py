@@ -266,6 +266,7 @@ class Map:
     kwargs: dict[str, Any] = field(default_factory=dict)
     kwargs_factory: Any = None  # Callable[[str], dict] | None
     env: Environment | None = None
+    expand: str = "model_name"
 
     def _resolve_kwargs(self, variant: str) -> dict[str, Any]:
         base = dict(self.kwargs)
@@ -276,15 +277,15 @@ class Map:
     def _get_prefix(self) -> str:
         if self.key_prefix:
             return self.key_prefix
-        probe = self.process_class(model_name=_PROBE_SENTINEL, **self._resolve_kwargs(_PROBE_SENTINEL))  # type: ignore[call-arg]
+        probe = self.process_class(**{self.expand: _PROBE_SENTINEL}, **self._resolve_kwargs(_PROBE_SENTINEL))  # type: ignore[call-arg]
         return _infer_prefix(self.process_class, probe)
 
     def discover_variants(self, ctx: RunContext) -> list[str]:
         return _discover_variants(self._get_prefix(), ctx)
 
-    def expand(self, ctx: RunContext) -> list[ProcessBase]:
+    def instantiate(self, ctx: RunContext) -> list[ProcessBase]:
         variants = self.discover_variants(ctx)
-        procs = [self.process_class(model_name=v, **self._resolve_kwargs(v)) for v in variants]  # type: ignore[call-arg]
+        procs = [self.process_class(**{self.expand: v}, **self._resolve_kwargs(v)) for v in variants]  # type: ignore[call-arg]
         if self.env is not None:
             for p in procs:
                 p.env = self.env
@@ -296,19 +297,20 @@ class Reduce:
     """全 variant の成果物を集約する process_class のインスタンスを生成する."""
     process_class: type[ProcessBase]
     key_prefix: str = ""
+    expand: str = "model_names"
 
     def _get_prefix(self) -> str:
         if self.key_prefix:
             return self.key_prefix
-        probe = self.process_class(model_names=[_PROBE_SENTINEL])  # type: ignore[call-arg]
+        probe = self.process_class(**{self.expand: [_PROBE_SENTINEL]})  # type: ignore[call-arg]
         return _infer_prefix(self.process_class, probe)
 
     def discover_variants(self, ctx: RunContext) -> list[str]:
         return _discover_variants(self._get_prefix(), ctx)
 
-    def expand(self, ctx: RunContext) -> ProcessBase:
+    def instantiate(self, ctx: RunContext) -> ProcessBase:
         variants = self.discover_variants(ctx)
-        return self.process_class(model_names=variants)  # type: ignore[call-arg]
+        return self.process_class(**{self.expand: variants})  # type: ignore[call-arg]
 
 
 class PipelineHalted(Exception):
@@ -571,7 +573,7 @@ class Pipeline:
             elif isinstance(phase, _ChainPhase):
                 self._execute_chains(phase.maps, ctx, exec_ctx, force)
             elif isinstance(phase, _ReducePhase):
-                proc = phase.reduce.expand(ctx)
+                proc = phase.reduce.instantiate(ctx)
                 self._execute_static([proc], ctx, exec_ctx, force)
             elif isinstance(phase, _GatePhase):
                 if not phase.gate.check(ctx):
@@ -604,7 +606,7 @@ class Pipeline:
         for variant in variants:
             procs: list[ProcessBase] = []
             for m in maps:
-                p = m.process_class(model_name=variant, **m._resolve_kwargs(variant))  # type: ignore[call-arg]
+                p = m.process_class(**{m.expand: variant}, **m._resolve_kwargs(variant))  # type: ignore[call-arg]
                 if m.env is not None:
                     p.env = m.env
                 procs.append(p)
