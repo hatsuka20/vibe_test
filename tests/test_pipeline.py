@@ -1446,6 +1446,139 @@ class TestAllowFailure:
 
 
 # ===========================================================================
+# optional_produces
+# ===========================================================================
+@dataclass
+class ConditionalProcess(ProcessBase):
+    """params に応じて optional な Artifact を生成する Process."""
+
+    name: str = "conditional"
+    produces: list[str] = field(default_factory=lambda: ["main_out"])
+    optional_produces: list[str] = field(default_factory=lambda: ["extra_out"])
+    version: str = "1.0.0"
+    include_extra: bool = False
+
+    call_count: int = field(default=0, init=False, repr=False)
+
+    def params(self) -> dict[str, Any]:
+        return {"include_extra": self.include_extra}
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        self.call_count += 1
+        main = exec_ctx.out_path("main.dat")
+        main.write_bytes(b"MAIN")
+        result: dict[str, ProducedArtifact] = {
+            "main_out": ProducedArtifact(main, "bin", "v1"),
+        }
+        if self.include_extra:
+            extra = exec_ctx.out_path("extra.dat")
+            extra.write_bytes(b"EXTRA")
+            result["extra_out"] = ProducedArtifact(extra, "bin", "v1")
+        return result
+
+
+class TestOptionalProduces:
+    def test_without_optional(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """optional を返さなくてもバリデーションが通る."""
+        pipeline = Pipeline([ConditionalProcess()])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "main_out" in ctx.artifacts
+        assert "extra_out" not in ctx.artifacts
+
+    def test_with_optional(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """optional を返した場合は正常に登録される."""
+        pipeline = Pipeline([ConditionalProcess(include_extra=True)])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        assert "main_out" in ctx.artifacts
+        assert "extra_out" in ctx.artifacts
+        assert ctx.artifacts["extra_out"].path.read_bytes() == b"EXTRA"
+
+    def test_required_missing_raises(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """必須の produces が欠けたらエラー."""
+        from environment import LocalEnvironment
+
+        @dataclass
+        class MissingRequired(ProcessBase):
+            name: str = "missing_req"
+            produces: list[str] = field(default_factory=lambda: ["must_have"])
+            optional_produces: list[str] = field(default_factory=lambda: ["maybe"])
+            version: str = "1.0.0"
+
+            def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+                # must_have を返さない
+                return {}
+
+        local_exec_ctx = ExecContext(
+            out_dir=exec_ctx.out_dir, temp_dir=exec_ctx.temp_dir,
+            logger=exec_ctx.logger, env=LocalEnvironment(),
+        )
+        pipeline = Pipeline([MissingRequired()])
+        with pytest.raises(RuntimeError, match="produces mismatch"):
+            pipeline.run(run_ctx, local_exec_ctx)
+
+    def test_undeclared_key_raises(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """produces にも optional_produces にも無いキーを返すとエラー."""
+
+        @dataclass
+        class ExtraKey(ProcessBase):
+            name: str = "extra_key"
+            produces: list[str] = field(default_factory=lambda: ["out"])
+            optional_produces: list[str] = field(default_factory=lambda: ["opt"])
+            version: str = "1.0.0"
+
+            def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+                p = exec_ctx.out_path("out.dat")
+                p.write_bytes(b"X")
+                p2 = exec_ctx.out_path("rogue.dat")
+                p2.write_bytes(b"Y")
+                return {
+                    "out": ProducedArtifact(p, "bin", "v1"),
+                    "rogue": ProducedArtifact(p2, "bin", "v1"),
+                }
+
+        pipeline = Pipeline([ExtraKey()])
+        with pytest.raises(RuntimeError, match="produces mismatch"):
+            pipeline.run(run_ctx, exec_ctx)
+
+    def test_cache_hit_with_optional(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """optional を含む結果もキャッシュが効く."""
+        proc = ConditionalProcess(include_extra=True)
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1  # キャッシュヒット
+
+    def test_cache_invalidated_when_optional_changed(
+        self, run_ctx: RunContext, exec_ctx: ExecContext,
+    ) -> None:
+        """optional artifact のファイルが変更されるとキャッシュミスになる."""
+        proc = ConditionalProcess(include_extra=True)
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        # optional artifact のファイルを書き換え
+        run_ctx.artifacts["extra_out"].path.write_bytes(b"TAMPERED")
+
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 2  # キャッシュミス → 再実行
+
+    def test_cache_hit_without_optional(self, run_ctx: RunContext, exec_ctx: ExecContext) -> None:
+        """optional を返さなかった場合もキャッシュが効く."""
+        proc = ConditionalProcess(include_extra=False)
+        pipeline = Pipeline([proc])
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+        pipeline.run(run_ctx, exec_ctx)
+        assert proc.call_count == 1
+
+
+# ===========================================================================
 # Environment.executes
 # ===========================================================================
 class TestEnvironmentExecutes:

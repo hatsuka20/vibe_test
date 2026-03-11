@@ -191,6 +191,7 @@ class ProcessBase(ABC):
     requires: list[str] = field(default_factory=list)
     optional: list[OptionalInput] = field(default_factory=list)
     produces: list[str] = field(default_factory=list)
+    optional_produces: list[str] = field(default_factory=list)
     skip_if_missing: bool = False
     allow_failure: bool = False
     env: Environment | None = field(default=None, repr=False)
@@ -387,6 +388,12 @@ def _check_cache_static(proc: ProcessBase, ck: str, ctx: RunContext) -> bool:
         art = ctx.artifacts.get(pk)
         if not art or art.cache_key != ck or not art.path.exists() or sha256_path(art.path) != art.sha256:
             return False
+    # optional_produces: 前回生成されたもの (ctx に存在) が有効か検証
+    for pk in proc.optional_produces:
+        art = ctx.artifacts.get(pk)
+        if art and art.producer == proc.name:
+            if art.cache_key != ck or not art.path.exists() or sha256_path(art.path) != art.sha256:
+                return False
     return True
 
 
@@ -492,10 +499,11 @@ def _execute_one(
 
     if not (dry and not produced) and proc.produces and not proc.allow_failure:
         produced_keys = set(produced.keys())
-        expected_keys = set(proc.produces)
-        if produced_keys != expected_keys:
-            missing = expected_keys - produced_keys
-            extra = produced_keys - expected_keys
+        required_keys = set(proc.produces)
+        allowed_keys = required_keys | set(proc.optional_produces)
+        missing = required_keys - produced_keys
+        extra = produced_keys - allowed_keys
+        if missing or extra:
             parts = [f"Process '{proc.name}' produces mismatch:"]
             if missing:
                 parts.append(f"missing={missing}")
