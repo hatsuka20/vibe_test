@@ -9,6 +9,7 @@ from environment import LocalEnvironment, DryRunEnvironment
 from pipeline import ExecContext, Gate, Map, Pipeline, PipelineHalted, Reduce, RunContext
 from processes import (
     AggregateProfile,
+    BenchmarkModel,
     CompareBaseline,
     CompileModel,
     DownloadModel,
@@ -117,6 +118,15 @@ def main() -> None:
         Map(FormatProfile),
         Map(CompareBaseline),
         Reduce(AggregateProfile),
+        Map(BenchmarkModel, kwargs_factory=lambda name: [
+            {
+                "num_iterations": n,
+                "runtime_path": str(toolchain.runtime_path),
+                "runtime_lib": toolchain.runtime_lib,
+                "runtime_flags": tuple(toolchain.runtime_flags),
+            }
+            for n in recipe.resolve_bench_iterations(name)
+        ]),
     ])
 
     try:

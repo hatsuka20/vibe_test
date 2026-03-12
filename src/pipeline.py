@@ -268,24 +268,57 @@ class Map:
     env: Environment | None = None
     expand: str = "model_name"
 
-    def _resolve_kwargs(self, variant: str) -> dict[str, Any]:
-        base = dict(self.kwargs)
+    def _resolve_kwargs(self, variant: str) -> dict[str, Any] | list[dict[str, Any]]:
+        """kwargs と kwargs_factory をマージして返す.
+
+        kwargs_factory が list[dict] を返した場合は fan-out を示し、
+        各 dict に self.kwargs をマージしたリストを返す。
+        """
         if self.kwargs_factory is not None:
-            base.update(self.kwargs_factory(variant))
-        return base
+            result = self.kwargs_factory(variant)
+            if isinstance(result, list):
+                return [{**self.kwargs, **r} for r in result]
+            base = dict(self.kwargs)
+            base.update(result)
+            return base
+        return dict(self.kwargs)
+
+    def _resolve_kwargs_single(self, variant: str) -> dict[str, Any]:
+        """probe 用: 常に単一 dict を返す.
+
+        probe sentinel の場合は kwargs_factory を呼ばず kwargs のみ返す。
+        fan-out 時は先頭要素を返す。
+        """
+        if variant == _PROBE_SENTINEL:
+            return dict(self.kwargs)
+        resolved = self._resolve_kwargs(variant)
+        if isinstance(resolved, list):
+            return resolved[0] if resolved else {}
+        return resolved
 
     def _get_prefix(self) -> str:
         if self.key_prefix:
             return self.key_prefix
-        probe = self.process_class(**{self.expand: _PROBE_SENTINEL}, **self._resolve_kwargs(_PROBE_SENTINEL))  # type: ignore[call-arg]
+        probe = self.process_class(**{self.expand: _PROBE_SENTINEL}, **self._resolve_kwargs_single(_PROBE_SENTINEL))  # type: ignore[call-arg]
         return _infer_prefix(self.process_class, probe)
 
     def discover_variants(self, ctx: RunContext) -> list[str]:
         return _discover_variants(self._get_prefix(), ctx)
 
+    def is_fan_out(self, variant: str) -> bool:
+        """この Map が指定 variant で fan-out するかを返す."""
+        return isinstance(self._resolve_kwargs(variant), list)
+
     def instantiate(self, ctx: RunContext) -> list[ProcessBase]:
         variants = self.discover_variants(ctx)
-        procs = [self.process_class(**{self.expand: v}, **self._resolve_kwargs(v)) for v in variants]  # type: ignore[call-arg]
+        procs: list[ProcessBase] = []
+        for v in variants:
+            resolved = self._resolve_kwargs(v)
+            if isinstance(resolved, list):
+                for kw in resolved:
+                    procs.append(self.process_class(**{self.expand: v}, **kw))  # type: ignore[call-arg]
+            else:
+                procs.append(self.process_class(**{self.expand: v}, **resolved))  # type: ignore[call-arg]
         if self.env is not None:
             for p in procs:
                 p.env = self.env
@@ -602,17 +635,40 @@ class Pipeline:
         if not variants:
             return
 
-        chains: dict[str, list[ProcessBase]] = {}
-        for variant in variants:
-            procs: list[ProcessBase] = []
-            for m in maps:
-                p = m.process_class(**{m.expand: variant}, **m._resolve_kwargs(variant))  # type: ignore[call-arg]
-                if m.env is not None:
-                    p.env = m.env
-                procs.append(p)
-            chains[variant] = procs
+        def _build_proc(m: Map, variant: str, kw: dict[str, Any]) -> ProcessBase:
+            p = m.process_class(**{m.expand: variant}, **kw)  # type: ignore[call-arg]
+            if m.env is not None:
+                p.env = m.env
+            return p
 
-        def run_chain(variant: str, procs: list[ProcessBase]) -> None:
+        def _run_sub_chain(
+            sub_key: str,
+            procs: list[ProcessBase],
+            parent_out: Path,
+            parent_env: Environment,
+        ) -> None:
+            """サブチェーン (fan-out 後の分岐) を実行する."""
+            sub_dir = parent_out.parent / "sub" / sub_key
+            sub_out = sub_dir / "out"
+            sub_tmp = sub_dir / "tmp"
+            sub_out.mkdir(parents=True, exist_ok=True)
+            sub_tmp.mkdir(parents=True, exist_ok=True)
+            sub_exec_ctx = ExecContext(
+                out_dir=sub_out,
+                temp_dir=sub_tmp,
+                logger=exec_ctx.logger,
+                env=_SandboxedEnvironment(parent_env, cwd=sub_tmp),
+            )
+            for proc in procs:
+                try:
+                    _execute_one(proc, ctx, sub_exec_ctx, force=force)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Process '{proc.name}' failed in sub-chain '{sub_key}'"
+                    ) from exc
+            _relocate_tree(sub_out, parent_out, ctx)
+
+        def run_chain(variant: str, maps: list[Map]) -> None:
             chain_dir = exec_ctx.temp_dir / variant
             chain_out = chain_dir / "out"
             chain_tmp = chain_dir / "tmp"
@@ -624,13 +680,46 @@ class Pipeline:
                 logger=exec_ctx.logger,
                 env=_SandboxedEnvironment(exec_ctx.env, cwd=chain_tmp),
             )
-            for proc in procs:
-                try:
-                    _execute_one(proc, ctx, chain_exec_ctx, force=force)
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Process '{proc.name}' failed in chain '{variant}'"
-                    ) from exc
+
+            # maps を順に処理し、fan-out ポイントで分岐
+            i = 0
+            while i < len(maps):
+                m = maps[i]
+                resolved = m._resolve_kwargs(variant)
+
+                if isinstance(resolved, list):
+                    # --- fan-out: 残りの maps をサブチェーンで処理 ---
+                    remaining = maps[i:]
+                    sub_chains: dict[str, list[ProcessBase]] = {}
+                    for kw in resolved:
+                        proc = _build_proc(m, variant, kw)
+                        sub_key = proc.name
+                        sub_procs = [proc]
+                        for rm in remaining[1:]:
+                            rm_resolved = rm._resolve_kwargs(variant)
+                            if isinstance(rm_resolved, list):
+                                # fan-out が連続する場合は先頭 kw のみ
+                                # (2段 fan-out は別途対応が必要)
+                                rm_resolved = rm_resolved[0] if rm_resolved else {}
+                            sub_procs.append(_build_proc(rm, variant, rm_resolved))
+                        sub_chains[sub_key] = sub_procs
+
+                    for sub_key, sub_procs in sub_chains.items():
+                        _run_sub_chain(
+                            sub_key, sub_procs, chain_out,
+                            chain_exec_ctx.env,
+                        )
+                    break  # fan-out 以降は全てサブチェーンで処理済み
+                else:
+                    # --- 通常: 逐次実行 ---
+                    proc = _build_proc(m, variant, resolved)
+                    try:
+                        _execute_one(proc, ctx, chain_exec_ctx, force=force)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Process '{proc.name}' failed in chain '{variant}'"
+                        ) from exc
+                    i += 1
 
             # chain_out の中身を exec_ctx.out_dir へ一括移動
             _relocate_tree(chain_out, exec_ctx.out_dir, ctx)
@@ -638,8 +727,8 @@ class Pipeline:
         errors: dict[str, Exception] = {}
         with ThreadPoolExecutor() as pool:
             futures = {
-                variant: pool.submit(run_chain, variant, procs)
-                for variant, procs in chains.items()
+                variant: pool.submit(run_chain, variant, maps)
+                for variant in variants
             }
             for variant, future in futures.items():
                 try:

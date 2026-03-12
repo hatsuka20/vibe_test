@@ -732,6 +732,145 @@ class TestMapExpand:
 
 
 # ===========================================================================
+# Map — fan-out (kwargs_factory が list[dict] を返すケース)
+# ===========================================================================
+class TestMapFanOut:
+    def test_fan_out_basic(self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path) -> None:
+        """kwargs_factory が list[dict] を返すと variant ごとに複数プロセスが生成される."""
+
+        @dataclass
+        class DetailedRun(ProcessBase):
+            model_name: str = "default"
+            num_cores: int = 1
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"run_{self.model_name}_c{self.num_cores}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"result.{self.model_name}.c{self.num_cores}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                path = ectx.out_path(f"result_{self.model_name}_c{self.num_cores}.dat")
+                path.write_bytes(f"{self.model_name}:{self.num_cores}".encode())
+                return {
+                    f"result.{self.model_name}.c{self.num_cores}":
+                        ProducedArtifact(path, "bin", "v1"),
+                }
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        core_map = {"a": [1, 2, 3], "b": [5, 6]}
+
+        pipeline = Pipeline([
+            Map(
+                DetailedRun,
+                kwargs_factory=lambda m: [{"num_cores": n} for n in core_map[m]],
+            ),
+        ])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        # A → 3 結果, B → 2 結果
+        assert "result.a.c1" in ctx.artifacts
+        assert "result.a.c2" in ctx.artifacts
+        assert "result.a.c3" in ctx.artifacts
+        assert "result.b.c5" in ctx.artifacts
+        assert "result.b.c6" in ctx.artifacts
+        assert ctx.artifacts["result.a.c2"].path.read_bytes() == b"a:2"
+
+    def test_fan_out_after_normal_step(
+        self, run_ctx: RunContext, exec_ctx: ExecContext, tmp_path: Path,
+    ) -> None:
+        """チェーン内で通常 Map → fan-out Map の順に実行できる."""
+
+        @dataclass
+        class Compile(ProcessBase):
+            model_name: str = "default"
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"compile_{self.model_name}"
+                self.requires = [f"input.{self.model_name}"]
+                self.produces = [f"compiled.{self.model_name}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                path = ectx.out_path(f"compiled_{self.model_name}.bin")
+                path.write_bytes(b"COMPILED")
+                return {f"compiled.{self.model_name}": ProducedArtifact(path, "bin", "v1")}
+
+        @dataclass
+        class Run(ProcessBase):
+            model_name: str = "default"
+            num_cores: int = 1
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"run_{self.model_name}_c{self.num_cores}"
+                self.requires = [f"compiled.{self.model_name}"]
+                self.produces = [f"result.{self.model_name}.c{self.num_cores}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                path = ectx.out_path(f"result_{self.model_name}_c{self.num_cores}.dat")
+                path.write_bytes(f"{self.model_name}:{self.num_cores}".encode())
+                return {
+                    f"result.{self.model_name}.c{self.num_cores}":
+                        ProducedArtifact(path, "bin", "v1"),
+                }
+
+        _seed_inputs(run_ctx, tmp_path, ["a", "b"])
+        core_map = {"a": [1, 2], "b": [4]}
+
+        pipeline = Pipeline([
+            Map(Compile),                     # 通常 1:1
+            Map(Run, kwargs_factory=lambda m: [{"num_cores": n} for n in core_map[m]]),
+        ])
+        ctx = pipeline.run(run_ctx, exec_ctx)
+
+        # Compile 成果物
+        assert "compiled.a" in ctx.artifacts
+        assert "compiled.b" in ctx.artifacts
+        # Run fan-out 成果物
+        assert "result.a.c1" in ctx.artifacts
+        assert "result.a.c2" in ctx.artifacts
+        assert "result.b.c4" in ctx.artifacts
+        assert ctx.artifacts["result.b.c4"].path.read_bytes() == b"b:4"
+
+    def test_fan_out_instantiate(self, run_ctx: RunContext, tmp_path: Path) -> None:
+        """instantiate() が fan-out 時に全プロセスを返す."""
+
+        @dataclass
+        class P(ProcessBase):
+            model_name: str = "default"
+            n: int = 0
+            version: str = "1.0.0"
+
+            def __post_init__(self) -> None:
+                self.name = f"p_{self.model_name}_{self.n}"
+                self.requires = [f"in.{self.model_name}"]
+                self.produces = [f"out.{self.model_name}.{self.n}"]
+
+            def run(self, ctx: RunContext, ectx: ExecContext) -> dict[str, ProducedArtifact]:
+                return {}
+
+        for name in ["x", "y"]:
+            p = tmp_path / f"{name}.dat"
+            p.write_bytes(name.encode())
+            run_ctx.artifacts[f"in.{name}"] = Artifact(
+                key=f"in.{name}", path=p, format="bin", schema="v1",
+                producer="test", cache_key="x", sha256="x",
+            )
+
+        m = Map(P, kwargs_factory=lambda v: [{"n": i} for i in range(3)] if v == "x" else [{"n": 10}])
+        procs = m.instantiate(run_ctx)
+
+        names = {p.name for p in procs}
+        # x → 3, y → 1 = 4 total
+        assert len(procs) == 4
+        assert "p_x_0" in names
+        assert "p_x_1" in names
+        assert "p_x_2" in names
+        assert "p_y_10" in names
+
+
+# ===========================================================================
 # Reduce
 # ===========================================================================
 class TestReduce:

@@ -488,3 +488,65 @@ class AggregateProfile(ProcessBase):
 
         exec_ctx.logger.info("[E] 集約完了 -> %s", summary_path)
         return {"summary_report": ProducedArtifact(summary_path, "txt", "report.summary.v1")}
+
+
+# ---------------------------------------------------------------------------
+# Process F: コンパイル済みモデルを様々な反復回数でベンチマークする (fan-out 例)
+#   kwargs_factory が list[dict] を返すことで variant ごとに複数プロセスに展開される
+# ---------------------------------------------------------------------------
+@dataclass
+class BenchmarkModel(ProcessBase):
+    model_name: str = "default"
+    num_iterations: int = 100
+    runtime_path: str = "model-runtime"
+    runtime_lib: str = ""
+    runtime_flags: tuple[str, ...] = ()
+    version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        self.name = f"benchmark_{self.model_name}_n{self.num_iterations}"
+        self.requires = [f"compiled_model.{self.model_name}"]
+        self.produces = [f"benchmark.{self.model_name}.n{self.num_iterations}"]
+
+    def params(self) -> dict:
+        return {
+            "num_iterations": self.num_iterations,
+            "runtime_path": self.runtime_path,
+            "runtime_lib": self.runtime_lib,
+            "runtime_flags": list(self.runtime_flags),
+        }
+
+    def run(self, ctx: RunContext, exec_ctx: ExecContext) -> dict[str, ProducedArtifact]:
+        compiled_art = ctx.get(f"compiled_model.{self.model_name}")
+
+        cmd = RuntimeExec(
+            compiled_path=compiled_art.path,
+            profile_output=exec_ctx.out_path("_discard"),  # dummy
+            num_iterations=self.num_iterations,
+            runtime_path=self.runtime_path,
+            runtime_lib=self.runtime_lib,
+            runtime_flags=self.runtime_flags,
+        )
+        exec_ctx.logger.info(
+            "[F] ベンチマーク実行中: %s (%d iterations)",
+            compiled_art.path, self.num_iterations,
+        )
+        exec_ctx.env.run(cmd)
+
+        # mock
+        bench_path = exec_ctx.out_path(
+            f"benchmark_{self.model_name}_n{self.num_iterations}.json",
+        )
+        if exec_ctx.env.executes:
+            import random
+            bench_data = {
+                "model": self.model_name,
+                "iterations": self.num_iterations,
+                "latency_ms": round(2.0 + random.random() * 3, 2),
+                "throughput": round(400 + random.random() * 200, 1),
+            }
+            bench_path.write_text(json.dumps(bench_data, indent=2), encoding="utf-8")
+
+        exec_ctx.logger.info("[F] ベンチマーク完了 -> %s", bench_path)
+        key = f"benchmark.{self.model_name}.n{self.num_iterations}"
+        return {key: ProducedArtifact(bench_path, "json", "benchmark.v1")}

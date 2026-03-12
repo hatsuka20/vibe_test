@@ -28,6 +28,7 @@ class ModelConfig(BaseModel):
     name: str
     compile_options: CompileOptions | None = None
     run_options: RunOptions | None = None
+    bench_iterations: list[int] | None = None
 
 
 class Recipe(BaseModel):
@@ -36,6 +37,7 @@ class Recipe(BaseModel):
     target: TargetConfig = Field(default_factory=TargetConfig)
     compile_options: CompileOptions = Field(default_factory=CompileOptions)
     run_options: RunOptions = Field(default_factory=RunOptions)
+    bench_iterations: list[int] = Field(default_factory=lambda: [100])
     models: list[ModelConfig] = Field(default_factory=list)
     confirmed: bool = True
 
@@ -82,6 +84,13 @@ class Recipe(BaseModel):
                  if v is not None}
             )
         return RunOptions.model_validate(base)
+
+    def resolve_bench_iterations(self, model_name: str) -> list[int]:
+        """モデル固有のベンチマーク反復回数リストを返す (未指定なら共通設定)."""
+        model_cfg = self.get_model(model_name)
+        if model_cfg and model_cfg.bench_iterations is not None:
+            return model_cfg.bench_iterations
+        return self.bench_iterations
 
     def populate_models(self, model_names: list[str]) -> bool:
         """ダウンロードで発見されたモデル名をレシピに反映する.
